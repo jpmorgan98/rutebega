@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+# My additions
+*.pdf
+.DS_Store # for mac users
+**/.DS_Store
+
 # Distribution / packaging
 .Python
 build/
