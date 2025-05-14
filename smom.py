@@ -293,14 +293,14 @@ def build_smm_b(second):
             b_r = dx[i]/2*source[i] - (1-delta)*4*D[i]/dx[i]*(second[2*i+1] - second[2*i]) + (delta*2*D[i+1]) / dx[i+1]*(second[2*(i+1)+1]-second[2*(i+1)])
 
         elif i == N_cell - 1:  # right hand bcs
-            b_l = dx[i]/2*source[i]+ (1-delta)*4*D[i]/dx[i] * (second[2*i+1] - second[2*i]) - (delta*2*D[i-1])/ dx[i-1]*(second[2*(i-1)+1]-second[2*(i-1)])
+            b_l = dx[i]/2*source[i] + (1-delta)*4*D[i]/dx[i] * (second[2*i+1] - second[2*i]) - (delta*2*D[i-1])/ dx[i-1]*(second[2*(i-1)+1]-second[2*(i-1)])
             b_r = dx[i]/2*source[i] + J_r - 2*D[i]/dx[i]    * (second[2*i+1] - second[2*i])
 
             if bcr == "ref":
                 b_r = -D[i] / dx[i] * (second[2*i+1] - second[2*i])
 
         else:  # interior cell
-            b_l = dx[i]/2*source[i]   + (1-delta)*4*D[i]/dx[i] * (second[2*i+1] - second[2*i]) - (delta*4*D[i-1])/dx[i-1]*(second[2*(i-1)+1]-second[2*(i-1)])
+            b_l = dx[i]/2*source[i] + (1-delta)*4*D[i]/dx[i] * (second[2*i+1] - second[2*i]) - (delta*4*D[i-1])/dx[i-1]*(second[2*(i-1)+1]-second[2*(i-1)])
             b_r = dx[i]/2*source[i] - (1-delta)*4*D[i]/dx[i] * (second[2*i+1] - second[2*i]) + (delta*4*D[i+1])/dx[i+1]*(second[2*(i+1)+1]-second[2*(i+1)])
 
         b_vec[2 * i] = b_l
@@ -518,7 +518,7 @@ x_mid = 0.5 * (x_edge[:-1] + x_edge[1:])  # middle of half cells
 source_free_pure_absorber = False
 infinite_pure_absorber = False
 infinite_homogenous = False
-regression_slab = False
+regression_slab = True
 slab_absorbium = False
 yavuz_problem = True
 
