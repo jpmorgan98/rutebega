@@ -10,6 +10,7 @@ __pycache__/
 *.pdf
 .DS_Store # for mac users
 **/.DS_Store
+*.png
 
 # Distribution / packaging
 .Python

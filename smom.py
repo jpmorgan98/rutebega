@@ -16,7 +16,7 @@ np.set_printoptions(
 # Global Variables
 #
 
-N_angle = 32
+N_angle = 2
 dxv = 1.0
 
 Len = 25
@@ -502,7 +502,7 @@ af_printer = False
 
 # Basic iteration parameters
 max_it = int(4000)
-tol = 1e-4
+tol = 1e-5
 
 
 # Problem definition
@@ -520,7 +520,19 @@ infinite_pure_absorber = False
 infinite_homogenous = False
 regression_slab = True
 slab_absorbium = False
-yavuz_problem = True
+yavuz_problem = False
+
+af_cmap = cm.inferno
+
+label_font_size = 15
+
+#font = {'family' : 'normal',
+#        'weight' : 'bold',
+#        'size'   : 22}
+
+#from matplotlib import rc
+#rc('font', **font)
+
 
 #
 # Source free pure absorber
@@ -690,28 +702,28 @@ if regression_slab:
     from verification.lumped_ld_res import s2, s4, x_lldres
 
     plt.figure()
-    plt.plot(x_mid, zeroth_oci, "k*", label="OCI (l={})".format(l_oci))
-    plt.plot(x_mid, zeroth_smm, "m--", label="2nd (l={})".format(l_smm))
+    plt.plot(x_mid, zeroth_oci, "k*", label="OCI ({})".format(l_oci))
+    plt.plot(x_mid, zeroth_smm, "m--", label="2nd ({})".format(l_smm))
     if N_angle == 2:
-        plt.plot(x_lldres, s2, ".r", label="Ref (Lumped LLD SI)")
+        plt.plot(x_lldres, s2, ".r", label="Ref")
     elif N_angle == 4:
-        plt.plot(x_lldres, s4, ".r", label="Ref (Lumped LLD SI)")
+        plt.plot(x_lldres, s4, ".r", label="Ref")
     else:
         print("I don't have regression results for that many angles (using S4)")
         plt.plot(x_lldres, s4, ".r", label="Ref (Lumped LLD SI)")
 
-    plt.xlabel("x [cm]")
-    plt.ylabel(r"$\phi$")
-    plt.title(
-        "Regression test, ε={:.3e}\n S{}, σ={}, c={}, Δx={}".format(
-            error_sol, N_angle, sigma[0], sigma_s[0] / sigma[0], dx[0]
-        )
-    )
+    plt.xlabel("x [cm]", fontsize=label_font_size)
+    plt.ylabel(r"$\phi$", fontsize=label_font_size)
+    #plt.title(
+    #    "Regression test, ε={:.3e}\n S{}, σ={}, c={}, Δx={}".format(
+    #        error_sol, N_angle, sigma[0], sigma_s[0] / sigma[0], dx[0]
+    #    )
+    #)
     plt.ylim([0, np.max(zeroth_smm) * 1.15])
-    plt.legend()
+    plt.legend(fontsize=label_font_size)
     plt.grid()
-    plt.show()
-    #plt.savefig("regression_slabs4.pdf")
+    #plt.show()
+    plt.savefig("regression_slabs2.pdf")
 
 
 #
@@ -764,17 +776,17 @@ if slab_absorbium:
 
     # plotting flux
     plt.figure()
-    plt.plot(x_mid, zeroth_oci, "k*", label="OCI {}".format(l_oci))
-    plt.plot(x_mid, zeroth_smm, "m--", label="2nd {}".format(l_smm))
+    plt.plot(x_mid, zeroth_oci, "k*", label="OCI ({})".format(l_oci))
+    plt.plot(x_mid, zeroth_smm, "m--", label="2nd ({})".format(l_smm))
     plt.plot(x_mid, zeroth_ref, "r.", label="Ref.")
     plt.xlabel("x [cm]")
     plt.ylabel(r"$\phi$")
-    plt.title("Slab Absorbium\n S{}, Δx={}".format(N_angle, dx[0]))
+    #plt.title("Slab Absorbium\n S{}, Δx={}".format(N_angle, dx[0]))
     plt.legend()
     plt.grid()
-    #plt.savefig("slab_abs_sf.pdf")
-    plt.show()
-
+    plt.savefig("slab_abs_sf.pdf")
+    #plt.show()
+    exit()
     R_l = 0
     for m in range(int(N_angle/2)):
         R_l += weights[m] * angles[m] * (aflux_oci[2*m] - .5*(zeroth[0] + 3*angles[m]*first[0]))
@@ -816,7 +828,7 @@ if slab_absorbium:
 
     Z, MU = np.meshgrid(x_mid, mu_mid)
 
-    im = ax[0].contourf(MU.T, Z.T, af_ref, vmin=vmin, vmax=vmax, levels=6)
+    im = ax[0].contourf(MU.T, Z.T, af_ref, vmin=vmin, vmax=vmax, levels=6, cmap=af_cmap)
     ax[0].set_xlabel(r"Polar cosine, $\mu$")
     ax[0].set_ylabel(r"$x [cm]$")
     ax[0].set_title(r"Ref.")
@@ -830,7 +842,7 @@ if slab_absorbium:
             aflux_oci_sq[2*i, m] = aflux_oci[af_index]
             aflux_oci_sq[2*i+1, m] = aflux_oci[af_index+1]
 
-    ax[1].contourf(MU.T, Z.T, aflux_oci_sq, vmin=vmin, vmax=vmax, levels=6)
+    ax[1].contourf(MU.T, Z.T, aflux_oci_sq, vmin=vmin, vmax=vmax, levels=6, cmap=af_cmap)
     ax[1].set_xlabel(r"Polar cosine, $\mu$")
     ax[1].set_title(r"OCI")
 
@@ -841,7 +853,7 @@ if slab_absorbium:
             aflux_smm_sq[2*i, m] = aflux_smm[af_index]
             aflux_smm_sq[2*i+1, m] = aflux_smm[af_index+1]
 
-    ax[2].contourf(MU.T, Z.T, aflux_smm_sq, vmin=vmin, vmax=vmax, levels=6)
+    ax[2].contourf(MU.T, Z.T, aflux_smm_sq, vmin=vmin, vmax=vmax, levels=6, cmap=af_cmap)
     ax[2].set_xlabel(r"Polar cosine, $\mu$")
     ax[2].set_title(r"2nd")
 
@@ -997,7 +1009,7 @@ if yavuz_problem:
     fig, ax = plt.subplots(1, 3, sharey=True)
 
     Z, MU = np.meshgrid(z_mid, mu_mid)
-    im = ax[0].contourf(MU.T, Z.T, af_ref, vmin=vmin, vmax=vmax, levels=6)
+    im = ax[0].contourf(MU.T, Z.T, af_ref, vmin=vmin, vmax=vmax, levels=6, cmap=af_cmap)
     ax[0].set_xlabel(r"$\mu$")
     ax[0].set_ylabel(r"$x$")
     ax[0].set_title(r"Ref. (MC)")
@@ -1005,11 +1017,11 @@ if yavuz_problem:
     # need to remake for OCI descritizations
     Z, MU = np.meshgrid(x_mid, angles)
 
-    ax[1].contourf(MU.T, Z.T, aflux_oci_sq, vmin=vmin, vmax=vmax, levels=6)
+    ax[1].contourf(MU.T, Z.T, aflux_oci_sq, vmin=vmin, vmax=vmax, levels=6, cmap=af_cmap)
     ax[1].set_xlabel(r"$\mu$")
     ax[1].set_title(r"OCI")
 
-    ax[2].contourf(MU.T, Z.T, aflux_smm_sq, vmin=vmin, vmax=vmax, levels=6)
+    ax[2].contourf(MU.T, Z.T, aflux_smm_sq, vmin=vmin, vmax=vmax, levels=6, cmap=af_cmap)
     ax[2].set_xlabel(r"$\mu$")
     ax[2].set_title(r"2nd")
 

@@ -730,6 +730,8 @@ def transport():
 
     l = 0
 
+    spec_rad_list = []
+
     while (not converged):
 
         #oci loop
@@ -757,6 +759,8 @@ def transport():
         #else:
         error = np.linalg.norm(aflux-aflux_last, ord=2)
         spec_rad = error/error_last
+        if l>1:
+            spec_rad_list.append(spec_rad)
 
         if l>1:
             if (error<tol*(1-spec_rad)):
@@ -823,11 +827,13 @@ def transport():
     #plt.ylim([0,np.max(zeroth)*1.5])
     #plt.show()
 
-    return(zeroth, spec_rad, l)
+    return(zeroth, np.average(spec_rad_list), l)
 
 
+td_exp = True
+ss_exp = False
 
-if __name__ == '__main__':
+if ss_exp:
 
     source = 0.0
 
@@ -930,4 +936,73 @@ if __name__ == '__main__':
     plt.savefig("rho_ratio.pdf")
     plt.show()
 
+if td_exp:
 
+    source = 0.0
+
+    dx = .1
+    N_cell = 50
+    #Len = 1
+    #N_cell = int(Len/dx)
+    N = 2*N_angle*N_cell
+
+    sigma_const = 1.0
+    sigma_s = sigma*0.0
+    sigma_a = sigma-sigma_s
+    D = 1/(3*sigma)
+
+    af_l = 0
+    af_r = 0
+
+    J_l = 0
+    J_r = 0
+
+    N_mfp = 10
+    N_c = 6
+    N_mft = 6
+
+    mfp_range = np.logspace(-1,1,N_mfp)
+    c_range = np.linspace(0,1,N_c)
+    mft_range = np.logspace(-4,0,N_mft)
+
+    spec_rad_pacc = np.zeros((N_mfp, N_c, N_mft))
+    spec_rad_oci = np.zeros((N_mfp, N_c, N_mft))
+
+    printer = False
+
+    for t in range(N_mft):
+        print("\n\n===============New MFT!===============")
+        print(mft_range[t], sigma_const + 1/mft_range[t], " largest N cell ", int(Len/(mfp_range[0]/(sigma_const + 1/mft_range[t]))))
+        print("\n\n")
+
+        for k in range(N_mfp):
+            for h in range(N_c):
+
+                sigma = 1 + 1/mft_range[t]
+                print(sigma*mft_range[t], mft_range[t], sigma)
+
+                dx = mfp_range[k]/sigma
+                Len = N_cell*dx
+                #N_cell = int(Len/dx)
+                #N = 2*N_angle*int(Len/dx)
+
+                sigma_s = sigma*c_range[h]
+                sigma_a = sigma-sigma_s
+                D = 1/(3*sigma)
+
+                SET_palmer_acc = False
+                sf_oci, spec_rad_oci[k,h,t], oci_i = transport()
+
+                SET_palmer_acc = True
+                sf_palmer, spec_rad_pacc[k,h,t], sosa_i = transport()
+
+                if spec_rad_pacc[k,h,t] > 1:
+                    spec_rad_pacc[k,h,t] = 1
+
+                print("τ=%.1e, δ=%.1e, c=%.1f, OCI took %4d (%.4f), Palmer Acc took %4d (%.4f)"%(mft_range[t], mfp_range[k], c_range[h], oci_i, spec_rad_oci[k,h,t], sosa_i, spec_rad_pacc[k,h,t] ))
+    
+    np.savez("td_exp", mfp=mfp_range, c=c_range, mft=mft_range, spec_rad_oci=spec_rad_oci, spec_rad_pacc=spec_rad_pacc)
+    
+    print()
+    print("Maximum ρ for SMM: %.3f, for OCI: %.3f"%(np.max(spec_rad_pacc), np.max(spec_rad_oci)))
+    print()

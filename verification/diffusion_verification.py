@@ -131,6 +131,8 @@ def diffusion_solve():
     return(sf, J)
 
 
+label_font_size = 15
+
 #
 # Inf pure absorber via Boundary Conditions
 #
@@ -198,10 +200,10 @@ plt.figure()
 plt.plot(np.linspace(0,Len, N_cell), man_lin_sol, '*', label=r"$\phi_{man}=\frac{x}{2}+1$")
 plt.plot(np.linspace(0,Len, 2*N_cell), sf, '--', label='diffusion sol')
 #plt.plot(np.linspace(0,Len, N_cell), source, label=r"$Q_{man}=\Sigma_a\left(\frac{x}{2}+1\right)$")
-plt.ylabel(r"$\phi")
-plt.xlabel("x [cm]")
+plt.ylabel(r"$\phi$", fontsize=label_font_size)
+plt.xlabel("x [cm]", fontsize=label_font_size)
 #plt.title("Linear MMS Verification \n (Prescribed Incident BCs) Σ={}, c={}, Δx={}".format(sigma, sigma_s/sigma, dx))
-plt.legend()
+plt.legend(fontsize=label_font_size)
 plt.savefig("linear_mms.pdf")
 #plt.show()
 
@@ -224,10 +226,10 @@ plt.figure()
 plt.plot(np.linspace(0,Len, N_cell), man_lin_sol, '*', label=r"$\phi_{man}=-2x^2+1$")
 plt.plot(np.linspace(0,Len, 2*N_cell), sf, '--', label='diffusion sol')
 #plt.plot(np.linspace(0,Len, N_cell), source, label=r"$Q_{man}=4D+\Sigma_a\left(-2x^2+1\right)$")
-plt.ylabel(r"$\phi")
-plt.xlabel("x [cm]")
+plt.ylabel(r"$\phi$", fontsize=label_font_size)
+plt.xlabel("x [cm]", fontsize=label_font_size)
 #plt.title("Quadratic MMS Verification \n (Prescribed Incident BCs) Σ={}, c={}, Δx={}".format(sigma, sigma_s/sigma, dx))
-plt.legend()
+plt.legend(fontsize=label_font_size)
 #plt.ylim([0, 1.25*np.max(sf)])
 plt.savefig("quadratic_mms.pdf")
 #plt.show()
