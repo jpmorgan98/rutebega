@@ -41,12 +41,14 @@ def build_cell_matrix(dx, dy, sig_t, sig_s, mu, eta, w, omega_total):
         Ak = A_dir_corner_balance(mu[k], eta[k], dx, dy, sig_t)
         A[4*k:4*k+4, 4*k:4*k+4] = Ak
 
-    beta = (sig_s * (dx*dy) / 4.0) / omega_total
+    area = dx * dy
+    beta = sig_s * area / (16.0 * omega_total)   # NOTE the 16 = 4 (quarter area) * 4 (corner average)
 
     for c in range(4):
         row_idx = np.arange(N_dir) * 4 + c
-        col_idx = np.arange(N_dir) * 4 + c
-        A[np.ix_(row_idx, col_idx)] -= beta * w[None, :]
+        for cp in range(4):
+            col_idx = np.arange(N_dir) * 4 + cp
+            A[np.ix_(row_idx, col_idx)] -= beta * w[None, :]
 
     return A
 
@@ -479,7 +481,14 @@ def smm(
 
     Jm = compute_incident_partial_currents_2d_inplane(bc, mu, eta, w)
 
-    alpha = 2.0 / np.pi
+    omega_total = np.sum(w)
+
+    M1x = np.sum(w[mu > 0] * mu[mu > 0])
+    M1y = np.sum(w[eta > 0] * eta[eta > 0])
+
+    alpha_x = 2.0 * M1x / omega_total
+    alpha_y = 2.0 * M1y / omega_total
+
     Nx, Ny = q_cell.shape
 
     g_left   = (-2.0 * Jm["left"])   + (Ux[0, :] / (sig_t[0, :] + 1e-300))
@@ -488,10 +497,10 @@ def smm(
     g_top    = (-2.0 * Jm["top"])    - (Uy[:, Ny-1] / (sig_t[:, Ny-1] + 1e-300))
 
     robin = dict(
-        left=dict(alpha=alpha, g=g_left),
-        right=dict(alpha=alpha, g=g_right),
-        bottom=dict(alpha=alpha, g=g_bottom),
-        top=dict(alpha=alpha, g=g_top),
+        left   = dict(alpha=alpha_x, g=g_left),
+        right  = dict(alpha=alpha_x, g=g_right),
+        bottom = dict(alpha=alpha_y, g=g_bottom),
+        top    = dict(alpha=alpha_y, g=g_top),
     )
 
     D0 = 1.0 / (2.0 * (sig_t + 1e-300))
@@ -620,16 +629,24 @@ def transport_2d_oci(
 
 
 if __name__ == "__main__":
-    bc = dict(left=0.25, right=0.0, bottom=0.1, top=0.0)
+
+    q = 2.0
+    sigma = 0.1
+    c = .1
+    sigma_s = sigma*c
+    inf_homo = q / ( sigma*(1-c) )
+    inf_homo /= (2*np.pi)
+    
+    bc = dict(left=inf_homo, right=inf_homo, bottom=inf_homo, top=inf_homo)
 
     phi, psi, ang, mesh, rho, it = transport_2d_oci(
-        Nx=15, Ny=20, Lx=4.0, Ly=4.0,
+        Nx=10, Ny=10, Lx=1.0, Ly=1.0,
         N_dir=8,
-        sig_t_val=5.0, sig_s_val=4.0,
-        q_val=1.0,
+        sig_t_val=sigma, sig_s_val=sigma_s,
+        q_val=q,
         bc=bc,
         tol=1e-6, max_it=500, printer=True,
-        smm_acc=False, update="yavuz"
+        smm_acc=True, update="yavuz"
     )
 
     x, y, X, Y = mesh["x"], mesh["y"], mesh["X"], mesh["Y"]
