@@ -230,23 +230,40 @@ def div_div_Q_inplane(Qxx, Qxy, dx, dy):
     return dUx_dx + dUy_dy
 
 
-def solve_robin_diffusion(phi_rhs, sig_a, D, dx, dy, robin):
+def solve_diffusion(phi_rhs, sig_a, Dcell, dx, dy, robin):
+    """
+    Solve:  -div(D grad phi) + sig_a * phi = phi_rhs
+    on a uniform grid with cell-centered unknowns.
+
+    Dcell, sig_a, phi_rhs are (Nx,Ny).
+    Robin BC on each side: D * dphi/dn + alpha * phi = g
+    implemented via ghost-cell elimination using:
+      D*(phi_g - phi_c)/h + alpha*(phi_c + phi_g)/2 = g
+    with h = dx on left/right and h = dy on bottom/top, consistent with your original.
+
+    robin sides:
+      robin["left"]   = {"alpha": alpha, "g": g_left[j]}
+      robin["right"]  = {"alpha": alpha, "g": g_right[j]}
+      robin["bottom"] = {"alpha": alpha, "g": g_bottom[i]}
+      robin["top"]    = {"alpha": alpha, "g": g_top[i]}
+    """
     Nx, Ny = phi_rhs.shape
     N = Nx * Ny
-    A = np.zeros((N, N))
-    b = phi_rhs.reshape(N).copy()  # C-order flatten consistent with idx below
 
     inv_dx2 = 1.0 / (dx * dx)
     inv_dy2 = 1.0 / (dy * dy)
 
     def idx(i, j):
-        # C-order flattening for (Nx, Ny): offset = i*Ny + j
         return i * Ny + j
 
-    def robin_ab(alpha, g, h):
-        # D*(phi_g - phi_c)/h + alpha*(phi_c + phi_g)/2 = g
-        denom = (D / h + alpha / 2.0)
-        a = (D / h - alpha / 2.0) / denom
+    def harmonic(a, b):
+        den = a + b
+        return np.where(den > 0.0, 2.0 * a * b / den, 0.0)
+
+    def robin_ghost_coeff(Df, alpha, g, h):
+        # Df*(phi_g - phi_c)/h + alpha*(phi_c + phi_g)/2 = g
+        denom = (Df / h + alpha / 2.0)
+        a = (Df / h - alpha / 2.0) / denom   # phi_g = a*phi_c + c
         c = g / denom
         return a, c
 
@@ -255,48 +272,180 @@ def solve_robin_diffusion(phi_rhs, sig_a, D, dx, dy, robin):
     alphaB, gB = robin["bottom"]["alpha"], robin["bottom"]["g"]  # gB shape (Nx,)
     alphaT, gT = robin["top"]["alpha"], robin["top"]["g"]        # gT shape (Nx,)
 
+    A = np.zeros((N, N))
+    b = phi_rhs.reshape(N).copy()
+
     for i in range(Nx):
         for j in range(Ny):
             p = idx(i, j)
 
-            diag = sig_a + 2.0 * D * inv_dx2 + 2.0 * D * inv_dy2
+            Dc = Dcell[i, j]
+            sa = sig_a[i, j]
 
-            # West (i-1) or left Robin
-            if i - 1 >= 0:
-                A[p, idx(i - 1, j)] = -D * inv_dx2
+            # Face diffusion coefficients
+            # West/East faces:
+            if i > 0:
+                Dw = harmonic(Dc, Dcell[i - 1, j])
             else:
-                a, c = robin_ab(alphaL, gL[j], dx)
-                diag += (-D * inv_dx2) * a
-                b[p] += (D * inv_dx2) * c
+                Dw = Dc
+            if i < Nx - 1:
+                De = harmonic(Dc, Dcell[i + 1, j])
+            else:
+                De = Dc
 
-            # East (i+1) or right Robin
-            if i + 1 < Nx:
-                A[p, idx(i + 1, j)] = -D * inv_dx2
+            # South/North faces:
+            if j > 0:
+                Ds = harmonic(Dc, Dcell[i, j - 1])
             else:
-                a, c = robin_ab(alphaR, gR[j], dx)
-                diag += (-D * inv_dx2) * a
-                b[p] += (D * inv_dx2) * c
+                Ds = Dc
+            if j < Ny - 1:
+                Dn = harmonic(Dc, Dcell[i, j + 1])
+            else:
+                Dn = Dc
 
-            # South (j-1) or bottom Robin
-            if j - 1 >= 0:
-                A[p, idx(i, j - 1)] = -D * inv_dy2
-            else:
-                a, c = robin_ab(alphaB, gB[i], dy)
-                diag += (-D * inv_dy2) * a
-                b[p] += (D * inv_dy2) * c
+            diag = sa + (Dw + De) * inv_dx2 + (Ds + Dn) * inv_dy2
 
-            # North (j+1) or top Robin
-            if j + 1 < Ny:
-                A[p, idx(i, j + 1)] = -D * inv_dy2
+            # West
+            if i > 0:
+                A[p, idx(i - 1, j)] = -Dw * inv_dx2
             else:
-                a, c = robin_ab(alphaT, gT[i], dy)
-                diag += (-D * inv_dy2) * a
-                b[p] += (D * inv_dy2) * c
+                a, c = robin_ghost_coeff(Dw, alphaL, gL[j], dx)
+                diag += (-Dw * inv_dx2) * a
+                b[p] += (Dw * inv_dx2) * c
+
+            # East
+            if i < Nx - 1:
+                A[p, idx(i + 1, j)] = -De * inv_dx2
+            else:
+                a, c = robin_ghost_coeff(De, alphaR, gR[j], dx)
+                diag += (-De * inv_dx2) * a
+                b[p] += (De * inv_dx2) * c
+
+            # South
+            if j > 0:
+                A[p, idx(i, j - 1)] = -Ds * inv_dy2
+            else:
+                a, c = robin_ghost_coeff(Ds, alphaB, gB[i], dy)
+                diag += (-Ds * inv_dy2) * a
+                b[p] += (Ds * inv_dy2) * c
+
+            # North
+            if j < Ny - 1:
+                A[p, idx(i, j + 1)] = -Dn * inv_dy2
+            else:
+                a, c = robin_ghost_coeff(Dn, alphaT, gT[i], dy)
+                diag += (-Dn * inv_dy2) * a
+                b[p] += (Dn * inv_dy2) * c
 
             A[p, p] = diag
 
-    phi = np.linalg.solve(A, b).reshape(Nx, Ny)  # matches idx + flatten
+    phi = np.linalg.solve(A, b).reshape(Nx, Ny)
     return phi
+
+
+
+
+def compute_cell_moments(psi, mu, eta, w):
+    """
+    psi: (Nx,Ny,N_dir,4)
+    Returns cell-centered moments:
+      phi (Nx,Ny)
+      Jx  (Nx,Ny)
+      Jy  (Nx,Ny)
+    using corner-average angular flux.
+    """
+    psi_avg = np.mean(psi, axis=3)  # (Nx,Ny,N_dir)
+    phi = np.tensordot(psi_avg, w, axes=([2],[0]))  # (Nx,Ny)
+    Jx  = np.tensordot(psi_avg, w * mu, axes=([2],[0]))
+    Jy  = np.tensordot(psi_avg, w * eta, axes=([2],[0]))
+    return phi, Jx, Jy
+
+
+def grad_center(phi, dx, dy):
+    """Centered gradient on cell centers with one-sided at boundaries."""
+    Nx, Ny = phi.shape
+    gx = np.zeros_like(phi)
+    gy = np.zeros_like(phi)
+
+    gx[1:-1, :] = (phi[2:, :] - phi[:-2, :]) / (2*dx)
+    gx[0, :]    = (phi[1, :] - phi[0, :]) / dx
+    gx[-1, :]   = (phi[-1, :] - phi[-2, :]) / dx
+
+    gy[:, 1:-1] = (phi[:, 2:] - phi[:, :-2]) / (2*dy)
+    gy[:, 0]    = (phi[:, 1] - phi[:, 0]) / dy
+    gy[:, -1]   = (phi[:, -1] - phi[:, -2]) / dy
+
+    return gx, gy
+
+
+def yavuz_update_edges_2d(
+    psi_xedge, psi_yedge,
+    mu, eta, bc,
+    phi_half, Jx_half, Jy_half,
+    phi_acc,  Jx_acc,  Jy_acc,
+):
+    """
+    Apply a 2D analog of Yavuz Eq.(11) to *interior* edges only.
+
+    Unit-circle P1-correction:
+      delta_psi(Ω) = (1/(2π)) * delta_phi  + (1/π) * Ω·delta_J
+    """
+    Nx_edges, Ny, N_dir, _ = psi_xedge.shape  # (Nx+1,Ny,N_dir,2)
+    Nx = Nx_edges - 1
+    Ny_edges = psi_yedge.shape[1]            # (Ny+1)
+
+    dphi = phi_acc - phi_half
+    dJx  = Jx_acc  - Jx_half
+    dJy  = Jy_acc  - Jy_half
+
+    # Interior vertical edges: i_edge = 1..Nx-1
+    for i_edge in range(1, Nx):
+        for j in range(Ny):
+            # interface moments: average the two adjacent cell-centered values
+            dphi_e = 0.5 * (dphi[i_edge-1, j] + dphi[i_edge, j])
+            dJx_e  = 0.5 * (dJx [i_edge-1, j] + dJx [i_edge, j])
+            dJy_e  = 0.5 * (dJy [i_edge-1, j] + dJy [i_edge, j])
+
+            for k in range(N_dir):
+                corr = (dphi_e / (2*np.pi)) + ((mu[k]*dJx_e + eta[k]*dJy_e) / np.pi)
+                psi_xedge[i_edge, j, k, 0] += corr
+                psi_xedge[i_edge, j, k, 1] += corr
+
+    # Interior horizontal edges: j_edge = 1..Ny-1
+    for i in range(Nx):
+        for j_edge in range(1, Ny_edges-1):
+            dphi_e = 0.5 * (dphi[i, j_edge-1] + dphi[i, j_edge])
+            dJx_e  = 0.5 * (dJx [i, j_edge-1] + dJx [i, j_edge])
+            dJy_e  = 0.5 * (dJy [i, j_edge-1] + dJy [i, j_edge])
+
+            for k in range(N_dir):
+                corr = (dphi_e / (2*np.pi)) + ((mu[k]*dJx_e + eta[k]*dJy_e) / np.pi)
+                psi_yedge[i, j_edge, k, 0] += corr
+                psi_yedge[i, j_edge, k, 1] += corr
+
+    # Re-enforce prescribed boundary values (leave inflow BCs untouched)
+    def as_dir_array(val):
+        val = np.asarray(val)
+        if val.shape == ():
+            return val * np.ones(N_dir)
+        assert val.shape == (N_dir,)
+        return val
+
+    bcL = as_dir_array(bc.get("left", 0.0))
+    bcR = as_dir_array(bc.get("right", 0.0))
+    bcB = as_dir_array(bc.get("bottom", 0.0))
+    bcT = as_dir_array(bc.get("top", 0.0))
+
+    psi_xedge[0,  :, :, :] = bcL[None, :, None]  # broadcast to (Ny,N_dir,2)
+    psi_xedge[-1, :, :, :] = bcR[None, :, None]
+    psi_yedge[:, 0,  :, :] = bcB[None, :, None]   # (1,N_dir,1) -> (Nx,N_dir,2)
+    psi_yedge[:, -1, :, :] = bcT[None, :, None]
+
+    # Optional robustness: prevent negative edge fluxes from aggressive corrections
+    psi_xedge[:] = np.maximum(psi_xedge, 0.0)
+    psi_yedge[:] = np.maximum(psi_yedge, 0.0)
+
+    return psi_xedge, psi_yedge
 
 
 
@@ -312,37 +461,31 @@ def compute_cell_moments_inplane(psi, mu, eta, w):
     return phi, Qxx, Qxy
 
 
-def apply_second_moment_acceleration_with_inflow_bc(
-    psi, q_cell, sig_t_val, sig_s_val, dx, dy, mu, eta, w, bc
+def smm(
+    psi, psi_xedge, psi_yedge,
+    q_cell, sig_t, sig_s, dx, dy, mu, eta, w, bc, update="yavuz"
 ):
-    """
-    Same SMA logic, but diffusion solve uses prescribed inflow via incident-partial-current Robin BC:
-      D0 ∂φ/∂n + (2/π) φ = -2 J^-_inc - (1/σ_t)(div Q)·n
-    """
     phi_half, Qxx, Qxy = compute_cell_moments_inplane(psi, mu, eta, w)
 
-    sig_a_val = sig_t_val - sig_s_val
-    if sig_a_val < 0:
-        raise ValueError("sig_a < 0 (sig_s > sig_t) is not physical for this acceleration.")
+    sig_a = sig_t - sig_s
+    if np.any(sig_a < 0.0):
+        mn = sig_a.min()
+        raise ValueError(f"sig_a < 0 somewhere (min {mn}); need sig_s <= sig_t everywhere.")
 
-    # Second-moment driving term (known from half-iterate)
-    s_sm = (1.0 / sig_t_val) * div_div_Q_inplane(Qxx, Qxy, dx, dy)
+    ddQ = div_div_Q_inplane(Qxx, Qxy, dx, dy)
+    s_sm = ddQ / (sig_t + 1e-300)
 
-    # Also need (div Q)·n on boundaries
     Ux, Uy = div_Q_vector_inplane(Qxx, Qxy, dx, dy)
 
-    # Incident partial currents from prescribed inflow
     Jm = compute_incident_partial_currents_2d_inplane(bc, mu, eta, w)
 
-    # Robin parameters
     alpha = 2.0 / np.pi
     Nx, Ny = q_cell.shape
 
-    # g = -2 J^-_inc - (1/σ_t)(div Q)·n
-    g_left   = (-2.0 * Jm["left"])   + (Ux[0, :] / sig_t_val)          # n=(-1,0)
-    g_right  = (-2.0 * Jm["right"])  - (Ux[Nx-1, :] / sig_t_val)       # n=(+1,0)
-    g_bottom = (-2.0 * Jm["bottom"]) + (Uy[:, 0] / sig_t_val)          # n=(0,-1)
-    g_top    = (-2.0 * Jm["top"])    - (Uy[:, Ny-1] / sig_t_val)       # n=(0,+1)
+    g_left   = (-2.0 * Jm["left"])   + (Ux[0, :] / (sig_t[0, :] + 1e-300))
+    g_right  = (-2.0 * Jm["right"])  - (Ux[Nx-1, :] / (sig_t[Nx-1, :] + 1e-300))
+    g_bottom = (-2.0 * Jm["bottom"]) + (Uy[:, 0] / (sig_t[:, 0] + 1e-300))
+    g_top    = (-2.0 * Jm["top"])    - (Uy[:, Ny-1] / (sig_t[:, Ny-1] + 1e-300))
 
     robin = dict(
         left=dict(alpha=alpha, g=g_left),
@@ -351,20 +494,39 @@ def apply_second_moment_acceleration_with_inflow_bc(
         top=dict(alpha=alpha, g=g_top),
     )
 
-    # Low-order solve:
-    #   -div(D0 grad φ) + σa φ = q + s_sm
-    D0 = 1.0 / (2.0 * sig_t_val)
+    D0 = 1.0 / (2.0 * (sig_t + 1e-300))
     rhs = q_cell + s_sm
-    phi_acc = solve_robin_diffusion(rhs, sig_a_val, D0, dx, dy, robin)
+    phi_acc = solve_diffusion(rhs, sig_a, D0, dx, dy, robin)
 
-    # Rescale angular flux to match accelerated scalar flux
-    eps = 1e-14
-    scale = phi_acc / (phi_half + eps)
-    scale = np.maximum(scale, 0.0)
-    psi *= scale[:, :, None, None]
+    if update == "rescale":
+        eps = 1e-14
+        scale = phi_acc / (phi_half + eps)
+        scale = np.maximum(scale, 0.0)
+        psi *= scale[:, :, None, None]
 
-    return psi, phi_half, phi_acc
+        # Recompute edges after acceleration
+        psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
 
+    elif update == "yavuz":
+        # IMPORTANT: operate on the *current* edges (do NOT rebuild unless you want to)
+        # If you want to rebuild them from psi before updating, keep your existing call.
+        # psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
+
+        phi_half2, Jx_half, Jy_half = compute_cell_moments(psi, mu, eta, w)
+
+        gx, gy = grad_center(phi_acc, dx, dy)
+        # NOTE: leaving your existing J_acc formula as-is for now per "fix 1 only"
+        # (You currently use sig_t_val which is undefined; we are not fixing that here.)
+        Jx_acc = -(0.5*gx + Ux) / sig_t
+        Jy_acc = -(0.5*gy + Uy) / sig_t
+
+        psi_xedge, psi_yedge = yavuz_update_edges_2d(
+            psi_xedge, psi_yedge, mu, eta, bc,
+            phi_half2, Jx_half, Jy_half,
+            phi_acc,  Jx_acc,  Jy_acc,
+        )
+
+    return psi, psi_xedge, psi_yedge, phi_half, phi_acc
 
 
 # -----------------------------
@@ -374,11 +536,11 @@ def transport_2d_oci(
     Nx=30, Ny=30,
     Lx=3.0, Ly=3.0,
     N_dir=4,
-    sig_t_val=1.0, sig_s_val=0.0,
-    q_val=1.0,
+    sig_t=None, sig_s=None, q=None,
     bc=None,
     tol=1e-4, max_it=2000, printer=True,
-    use_second_moment_accel=True,
+    smm_acc=True, update="yavuz",
+    sig_t_val=1.0, sig_s_val=0.0, q_val=1.0,
 ):
     if bc is None:
         bc = dict(left=0.0, right=0.0, bottom=0.0, top=0.0)
@@ -390,9 +552,13 @@ def transport_2d_oci(
     y = (np.arange(Ny) + 0.5) * dy
     X, Y = np.meshgrid(x, y, indexing="xy")
 
-    sig_t = sig_t_val * np.ones((Nx, Ny))
-    sig_s = sig_s_val * np.ones((Nx, Ny))
-    q_cell = q_val * np.ones((Nx, Ny))
+    if sig_t == None:
+        sig_t = sig_t_val * np.ones((Nx, Ny))
+    if sig_s == None:
+        assert (sig_s_val < sig_t).all
+        sig_s = sig_s_val * np.ones((Nx, Ny))
+    if q == None:
+        q_cell = q_val * np.ones((Nx, Ny))
 
     mu, eta, w, omega_total = make_circle_quadrature(N_dir)
 
@@ -416,18 +582,19 @@ def transport_2d_oci(
         psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
 
         # --- second-moment acceleration step (optional) ---
-        if use_second_moment_accel and sig_s_val > 0.0:
-            psi, phi_half, phi_acc = apply_second_moment_acceleration_with_inflow_bc(
-                psi=psi,
-                q_cell=q_cell,
-                sig_t_val=sig_t_val,
-                sig_s_val=sig_s_val,
-                dx=dx, dy=dy,
-                mu=mu, eta=eta, w=w,
-                bc=bc
-            )
-            # Recompute edges after acceleration
-            psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
+        if smm_acc and sig_s_val > 0.0:
+            psi, psi_xedge, psi_yedge, phi_half, phi_acc = smm(
+            psi=psi,
+            psi_xedge=psi_xedge,
+            psi_yedge=psi_yedge,
+            q_cell=q_cell,
+            sig_t=sig_t,
+            sig_s=sig_s,
+            dx=dx, dy=dy,
+            mu=mu, eta=eta, w=w,
+            bc=bc,
+            update=update,   # or whatever you want
+        )
 
         # Convergence check (on accelerated iterate)
         err = np.linalg.norm((psi - psi_last).ravel(), ord=2)
@@ -449,20 +616,20 @@ def transport_2d_oci(
     angles = dict(mu=mu, eta=eta, w=w)
     mesh = dict(x=x, y=y, X=X, Y=Y, dx=dx, dy=dy)
 
-    return phi, psi, angles, mesh
+    return phi, psi, angles, mesh, rho, it
 
 
 if __name__ == "__main__":
     bc = dict(left=0.25, right=0.0, bottom=0.1, top=0.0)
 
-    phi, psi, ang, mesh = transport_2d_oci(
+    phi, psi, ang, mesh, rho, it = transport_2d_oci(
         Nx=15, Ny=20, Lx=4.0, Ly=4.0,
         N_dir=8,
         sig_t_val=5.0, sig_s_val=4.0,
         q_val=1.0,
         bc=bc,
         tol=1e-6, max_it=500, printer=True,
-        use_second_moment_accel=False,
+        smm_acc=False, update="yavuz"
     )
 
     x, y, X, Y = mesh["x"], mesh["y"], mesh["X"], mesh["Y"]
