@@ -3,8 +3,8 @@ import matplotlib as plt
 from smom_2d_fast import transport_2d_oci
 from tqdm import tqdm
 
-c = np.linspace(0, 1.0, 5)
-delta = np.logspace(-1, 1, 10)
+c = np.linspace(0, 1.0, 50)
+delta = np.logspace(-1, 1, 60)
 
 
 
