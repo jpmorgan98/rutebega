@@ -928,7 +928,7 @@ def transport_2d_oci(
         bcT = np.full(N_dir, float(bcT))
 
     # keep your original gating behavior (uses sig_s_val)
-    smm_do = bool(smm_acc and (sig_s_val > 0.0))
+    smm_do = bool(smm_acc)
     update_yavuz = (update == "yavuz")
 
     phi, psi, rho, it = transport_2d_oci_core_nb(

@@ -3,8 +3,8 @@ import matplotlib as plt
 from smom_2d_fast import transport_2d_oci
 from tqdm import tqdm
 
-c = np.linspace(0, 1.0, 50)
-delta = np.logspace(-1, 1, 60)
+c = np.linspace(0, 1.0, 75)
+delta = np.logspace(-1, 1, 100)
 
 
 
@@ -111,7 +111,7 @@ with tqdm(total=total, desc="Running transport_2d_oci") as pbar:
             
             pbar.update(1)
 
-np.savez("twoD_exp", mfp=delta, c=c, spec_rad_oci=rho_un, spec_rad_yavuz=rho_yavuz, spec_rad_rescale=rho_rescale,
+np.savez("twoD_exp2", mfp=delta, c=c, spec_rad_oci=rho_un, spec_rad_yavuz=rho_yavuz, spec_rad_rescale=rho_rescale,
          err_phi_yavuz_l2=err_phi_yavuz_l2,
         err_phi_rescale_l2=err_phi_rescale_l2,
         err_psi_yavuz_l2=err_psi_yavuz_l2,
