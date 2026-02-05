@@ -345,8 +345,6 @@ def solve_diffusion(phi_rhs, sig_a, Dcell, dx, dy, robin):
     return phi
 
 
-
-
 def compute_cell_moments(psi, mu, eta, w):
     """
     psi: (Nx,Ny,N_dir,4)
@@ -379,53 +377,147 @@ def grad_center(phi, dx, dy):
 
     return gx, gy
 
+def compute_cell_moments_inplane(psi, mu, eta, w):
+    psi_avg = np.mean(psi, axis=3)  # (Nx,Ny,N_dir)
+    phi = np.tensordot(psi_avg, w, axes=([2], [0]))
 
-def yavuz_update_edges_2d(
-    psi_xedge, psi_yedge,
-    mu, eta, bc,
-    phi_half, Jx_half, Jy_half,
-    phi_acc,  Jx_acc,  Jy_acc,
+    qxx_basis = (mu**2 - 0.5)
+    qxy_basis = (mu * eta)
+
+    Qxx = np.tensordot(psi_avg, w * qxx_basis, axes=([2], [0]))
+    Qxy = np.tensordot(psi_avg, w * qxy_basis, axes=([2], [0]))
+    return phi, Qxx, Qxy
+
+
+def diffusion_face_currents(phi, Dcell, dx, dy, robin):
+    """
+    Compute face currents Jx_face (Nx+1,Ny), Jy_face (Nx,Ny+1)
+    with Jx positive in +x, Jy positive in +y.
+
+    Uses harmonic face D in the interior.
+    Uses the same Robin ghost relation as solve_diffusion at boundaries.
+    """
+    Nx, Ny = phi.shape
+
+    def harmonic(a, b):
+        den = a + b
+        return np.where(den > 0.0, 2.0 * a * b / den, 0.0)
+
+    def robin_ghost_coeff(Df, alpha, g, h):
+        denom = (Df / h + alpha / 2.0)
+        a = (Df / h - alpha / 2.0) / denom   # phi_g = a*phi_c + c
+        c = g / denom
+        return a, c
+
+    Jx = np.zeros((Nx+1, Ny))
+    Jy = np.zeros((Nx, Ny+1))
+
+    # --- x-faces ---
+    for j in range(Ny):
+        # left boundary face (between ghost and cell 0)
+        Dc = Dcell[0, j]
+        Dw = Dc
+        a, c = robin_ghost_coeff(Dw, robin["left"]["alpha"], robin["left"]["g"][j], dx)
+        phi_g = a * phi[0, j] + c
+        # gradient in +x at boundary face: (phi_c - phi_g)/dx
+        Jx[0, j] = -Dw * (phi[0, j] - phi_g) / dx
+
+        # interior faces
+        for i in range(1, Nx):
+            Df = harmonic(Dcell[i-1, j], Dcell[i, j])
+            Jx[i, j] = -Df * (phi[i, j] - phi[i-1, j]) / dx
+
+        # right boundary face (between cell Nx-1 and ghost)
+        Dc = Dcell[Nx-1, j]
+        De = Dc
+        a, c = robin_ghost_coeff(De, robin["right"]["alpha"], robin["right"]["g"][j], dx)
+        phi_g = a * phi[Nx-1, j] + c
+        Jx[Nx, j] = -De * (phi_g - phi[Nx-1, j]) / dx  # gradient in +x: (phi_g - phi_c)/dx
+
+    # --- y-faces ---
+    for i in range(Nx):
+        # bottom boundary face
+        Dc = Dcell[i, 0]
+        Ds = Dc
+        a, c = robin_ghost_coeff(Ds, robin["bottom"]["alpha"], robin["bottom"]["g"][i], dy)
+        phi_g = a * phi[i, 0] + c
+        Jy[i, 0] = -Ds * (phi[i, 0] - phi_g) / dy
+
+        # interior faces
+        for j in range(1, Ny):
+            Df = harmonic(Dcell[i, j-1], Dcell[i, j])
+            Jy[i, j] = -Df * (phi[i, j] - phi[i, j-1]) / dy
+
+        # top boundary face
+        Dc = Dcell[i, Ny-1]
+        Dn = Dc
+        a, c = robin_ghost_coeff(Dn, robin["top"]["alpha"], robin["top"]["g"][i], dy)
+        phi_g = a * phi[i, Ny-1] + c
+        Jy[i, Ny] = -Dn * (phi_g - phi[i, Ny-1]) / dy
+
+    return Jx, Jy
+
+def holo_set_interior_inflow_from_LO(
+    psi_xedge, psi_yedge, mu, eta, w, bc,
+    phi_acc, Jx_face, Jy_face,
 ):
     """
-    Apply a 2D analog of Yavuz Eq.(11) to *interior* edges only.
-
-    Unit-circle P1-correction:
-      delta_psi(Ω) = (1/(2π)) * delta_phi  + (1/π) * Ω·delta_J
+    Overwrite *interior* inflow on faces using LO face moments (phi_acc, J_face).
+    Keeps boundary inflow = bc.
     """
-    Nx_edges, Ny, N_dir, _ = psi_xedge.shape  # (Nx+1,Ny,N_dir,2)
+    Nx_edges, Ny, N_dir, _ = psi_xedge.shape
     Nx = Nx_edges - 1
-    Ny_edges = psi_yedge.shape[1]            # (Ny+1)
+    Ny_edges = psi_yedge.shape[1]
 
-    dphi = phi_acc - phi_half
-    dJx  = Jx_acc  - Jx_half
-    dJy  = Jy_acc  - Jy_half
+    mu = np.asarray(mu); eta = np.asarray(eta); w = np.asarray(w)
+    omega_total = np.sum(w)
 
-    # Interior vertical edges: i_edge = 1..Nx-1
+    # Precompute M2 for x-normal and y-normal (full-range)
+    M2x = np.sum(w * mu**2)
+    M2y = np.sum(w * eta**2)
+
+    # --- vertical faces i_edge = 1..Nx-1 ---
     for i_edge in range(1, Nx):
+        iL = i_edge - 1
+        iR = i_edge
         for j in range(Ny):
-            # interface moments: average the two adjacent cell-centered values
-            dphi_e = 0.5 * (dphi[i_edge-1, j] + dphi[i_edge, j])
-            dJx_e  = 0.5 * (dJx [i_edge-1, j] + dJx [i_edge, j])
-            dJy_e  = 0.5 * (dJy [i_edge-1, j] + dJy [i_edge, j])
+            # face scalar flux: average of adjacent cells (simple, consistent enough here)
+            phi_f = 0.5 * (phi_acc[iL, j] + phi_acc[iR, j])
 
-            for k in range(N_dir):
-                corr = (dphi_e / (2*np.pi)) + ((mu[k]*dJx_e + eta[k]*dJy_e) / np.pi)
-                psi_xedge[i_edge, j, k, 0] += corr
-                psi_xedge[i_edge, j, k, 1] += corr
+            # Jx_face is the net current in +x through this face
+            Jf = Jx_face[i_edge, j]
 
-    # Interior horizontal edges: j_edge = 1..Ny-1
+            # Inflow to RIGHT cell uses mu>0 with mu_n = mu
+            a = phi_f / omega_total
+            b = Jf / (M2x + 1e-300)
+            for k in np.where(mu > 0)[0]:
+                psi_xedge[i_edge, j, k, :] = a + b * mu[k]
+
+            # Inflow to LEFT cell uses mu<0 with mu_n = -mu, and outward normal is -x so Jn_out = -Jf
+            bL = (-Jf) / (M2x + 1e-300)
+            for k in np.where(mu < 0)[0]:
+                psi_xedge[i_edge, j, k, :] = a + bL * (-mu[k])
+
+    # --- horizontal faces j_edge = 1..Ny-1 ---
     for i in range(Nx):
         for j_edge in range(1, Ny_edges-1):
-            dphi_e = 0.5 * (dphi[i, j_edge-1] + dphi[i, j_edge])
-            dJx_e  = 0.5 * (dJx [i, j_edge-1] + dJx [i, j_edge])
-            dJy_e  = 0.5 * (dJy [i, j_edge-1] + dJy [i, j_edge])
+            jB = j_edge - 1
+            jT = j_edge
+            phi_f = 0.5 * (phi_acc[i, jB] + phi_acc[i, jT])
+            Jf = Jy_face[i, j_edge]  # net current in +y
 
-            for k in range(N_dir):
-                corr = (dphi_e / (2*np.pi)) + ((mu[k]*dJx_e + eta[k]*dJy_e) / np.pi)
-                psi_yedge[i, j_edge, k, 0] += corr
-                psi_yedge[i, j_edge, k, 1] += corr
+            # inflow to TOP (eta>0), mu_n=eta
+            a = phi_f / omega_total
+            b = Jf / (M2y + 1e-300)
+            for k in np.where(eta > 0)[0]:
+                psi_yedge[i, j_edge, k, :] = a + b * eta[k]
 
-    # Re-enforce prescribed boundary values (leave inflow BCs untouched)
+            # inflow to BOTTOM (eta<0), outward normal -y so Jn_out = -Jf, mu_n = -eta
+            bB = (-Jf) / (M2y + 1e-300)
+            for k in np.where(eta < 0)[0]:
+                psi_yedge[i, j_edge, k, :] = a + bB * (-eta[k])
+
+    # --- enforce boundary inflow from bc (as you already do) ---
     def as_dir_array(val):
         val = np.asarray(val)
         if val.shape == ():
@@ -438,29 +530,18 @@ def yavuz_update_edges_2d(
     bcB = as_dir_array(bc.get("bottom", 0.0))
     bcT = as_dir_array(bc.get("top", 0.0))
 
-    psi_xedge[0,  :, :, :] = bcL[None, :, None]  # broadcast to (Ny,N_dir,2)
-    psi_xedge[-1, :, :, :] = bcR[None, :, None]
-    psi_yedge[:, 0,  :, :] = bcB[None, :, None]   # (1,N_dir,1) -> (Nx,N_dir,2)
-    psi_yedge[:, -1, :, :] = bcT[None, :, None]
-
-    # Optional robustness: prevent negative edge fluxes from aggressive corrections
-    psi_xedge[:] = np.maximum(psi_xedge, 0.0)
-    psi_yedge[:] = np.maximum(psi_yedge, 0.0)
+    for k in np.where(mu > 0)[0]:
+        psi_xedge[0, :, k, :] = bcL[k]
+    for k in np.where(mu < 0)[0]:
+        psi_xedge[-1, :, k, :] = bcR[k]
+    for k in np.where(eta > 0)[0]:
+        psi_yedge[:, 0, k, :] = bcB[k]
+    for k in np.where(eta < 0)[0]:
+        psi_yedge[:, -1, k, :] = bcT[k]
 
     return psi_xedge, psi_yedge
 
 
-
-def compute_cell_moments_inplane(psi, mu, eta, w):
-    psi_avg = np.mean(psi, axis=3)  # (Nx,Ny,N_dir)
-    phi = np.tensordot(psi_avg, w, axes=([2], [0]))
-
-    qxx_basis = (mu**2 - 0.5)
-    qxy_basis = (mu * eta)
-
-    Qxx = np.tensordot(psi_avg, w * qxx_basis, axes=([2], [0]))
-    Qxy = np.tensordot(psi_avg, w * qxy_basis, axes=([2], [0]))
-    return phi, Qxx, Qxy
 
 
 def smm(
@@ -517,22 +598,38 @@ def smm(
         psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
 
     elif update == "yavuz":
-        # IMPORTANT: operate on the *current* edges (do NOT rebuild unless you want to)
-        # If you want to rebuild them from psi before updating, keep your existing call.
-        # psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
-
+        # moments of current (half) iterate
         phi_half2, Jx_half, Jy_half = compute_cell_moments(psi, mu, eta, w)
 
         gx, gy = grad_center(phi_acc, dx, dy)
-        # NOTE: leaving your existing J_acc formula as-is for now per "fix 1 only"
-        # (You currently use sig_t_val which is undefined; we are not fixing that here.)
-        Jx_acc = -(0.5*gx + Ux) / sig_t
-        Jy_acc = -(0.5*gy + Uy) / sig_t
+        Jx_acc = -(0.5*gx + Ux) / (sig_t + 1e-300)
+        Jy_acc = -(0.5*gy + Uy) / (sig_t + 1e-300)
 
-        psi_xedge, psi_yedge = yavuz_update_edges_2d(
-            psi_xedge, psi_yedge, mu, eta, bc,
-            phi_half2, Jx_half, Jy_half,
-            phi_acc,  Jx_acc,  Jy_acc,
+        dphi = phi_acc - phi_half2
+        dJx  = Jx_acc  - Jx_half
+        dJy  = Jy_acc  - Jy_half
+
+        # --- under-relaxation (critical) ---
+        omega = 1.0   # start 0.3–0.7; 0.5 is a good default
+
+        inv2pi = 1.0/(2.0*np.pi)
+        invpi  = 1.0/np.pi
+
+        # apply P1 correction directly to cell angular flux
+        for k in range(len(w)):
+            delta = inv2pi * dphi + invpi * (mu[k]*dJx + eta[k]*dJy)  # (Nx,Ny)
+            psi[:, :, k, :] += omega * delta[:, :, None]             # add to all 4 corners
+
+        # moments of current HO iterate (optional; mostly for diagnostics now)
+        phi_half2, Jx_half, Jy_half = compute_cell_moments(psi, mu, eta, w)
+
+        # LO face currents consistent with diffusion stencil
+        Jx_face, Jy_face = diffusion_face_currents(phi_acc, D0, dx, dy, robin)
+
+        # HOLO coupling: overwrite interior inflow on faces using LO (phi, Jn) on faces
+        psi_xedge, psi_yedge = holo_set_interior_inflow_from_LO(
+            psi_xedge, psi_yedge, mu, eta, w, bc,
+            phi_acc, Jx_face, Jy_face
         )
 
     return psi, psi_xedge, psi_yedge, phi_half, phi_acc
@@ -544,11 +641,11 @@ def smm(
 def transport_2d_oci(
     Nx=30, Ny=30,
     Lx=3.0, Ly=3.0,
-    N_dir=4,
+    N_dir=8,
     sig_t=None, sig_s=None, q=None,
     bc=None,
     tol=1e-4, max_it=2000, printer=True,
-    smm_acc=True, update="yavuz",
+    smm_acc=True, update="rescale",
     sig_t_val=1.0, sig_s_val=0.0, q_val=1.0,
 ):
     if bc is None:
@@ -631,8 +728,8 @@ def transport_2d_oci(
 if __name__ == "__main__":
 
     q = 2.0
-    sigma = 0.1
-    c = .1
+    sigma = 5.0
+    c = 0.7
     sigma_s = sigma*c
     inf_homo = q / ( sigma*(1-c) )
     inf_homo /= (2*np.pi)
@@ -640,7 +737,7 @@ if __name__ == "__main__":
     bc = dict(left=inf_homo, right=inf_homo, bottom=inf_homo, top=inf_homo)
 
     phi, psi, ang, mesh, rho, it = transport_2d_oci(
-        Nx=10, Ny=10, Lx=1.0, Ly=1.0,
+        Nx=30, Ny=30, Lx=1.0, Ly=1.0,
         N_dir=8,
         sig_t_val=sigma, sig_s_val=sigma_s,
         q_val=q,
