@@ -898,10 +898,10 @@ def smm(
 
     elif diff == "second_moment":
 
-        g_left   += (Ux[0, :] / (sig_t[0, :] + 1e-300))
-        g_right  -= (Ux[Nx-1, :] / (sig_t[Nx-1, :] + 1e-300))
-        g_bottom += (Uy[:, 0] / (sig_t[:, 0] + 1e-300))
-        g_top    -= (Uy[:, Ny-1] / (sig_t[:, Ny-1] + 1e-300))
+        # g_left   += (Ux[0, :] / (sig_t[0, :] + 1e-300))
+        # g_right  -= (Ux[Nx-1, :] / (sig_t[Nx-1, :] + 1e-300))
+        # g_bottom += (Uy[:, 0] / (sig_t[:, 0] + 1e-300))
+        # g_top    -= (Uy[:, Ny-1] / (sig_t[:, Ny-1] + 1e-300))
 
         phi_acc, Jx_face, Jy_face = solve_mixed_lo(q_cell, sig_a, sig_t, Ux, Uy, dx, dy, robin)
 
