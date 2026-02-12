@@ -32,6 +32,8 @@ def A_dir_corner_balance(mu, eta, dx, dy, sig_t):
     return A
 
 
+global_flag_transport_scattering = True
+
 def build_cell_matrix(dx, dy, sig_t, sig_s, mu, eta, w, omega_total):
     N_dir = len(w)
     n = 4 * N_dir
@@ -44,7 +46,10 @@ def build_cell_matrix(dx, dy, sig_t, sig_s, mu, eta, w, omega_total):
     area = dx * dy
 
     # you can make scattering 0 when acceleratin!
-    beta = sig_s * area / (16.0 * omega_total)   # NOTE the 16 = 4 (quarter area) * 4 (corner average)
+    if global_flag_transport_scattering:
+        beta = sig_s * area / (16.0 * omega_total)   # NOTE the 16 = 4 (quarter area) * 4 (corner average)
+    else:
+        beta = 0
 
     for c in range(4):
         row_idx = np.arange(N_dir) * 4 + c
@@ -246,22 +251,6 @@ def compute_cell_moments(psi, mu, eta, w):
     return phi, Jx, Jy
 
 
-def grad_center(phi, dx, dy):
-    """Centered gradient on cell centers with one-sided at boundaries."""
-    Nx, Ny = phi.shape
-    gx = np.zeros_like(phi)
-    gy = np.zeros_like(phi)
-
-    gx[1:-1, :] = (phi[2:, :] - phi[:-2, :]) / (2*dx)
-    gx[0, :]    = (phi[1, :] - phi[0, :]) / dx
-    gx[-1, :]   = (phi[-1, :] - phi[-2, :]) / dx
-
-    gy[:, 1:-1] = (phi[:, 2:] - phi[:, :-2]) / (2*dy)
-    gy[:, 0]    = (phi[:, 1] - phi[:, 0]) / dy
-    gy[:, -1]   = (phi[:, -1] - phi[:, -2]) / dy
-
-    return gx, gy
-
 def compute_cell_moments_inplane(psi, mu, eta, w):
     psi_avg = np.mean(psi, axis=3)  # (Nx,Ny,N_dir)
     phi = np.tensordot(psi_avg, w, axes=([2], [0]))
@@ -274,285 +263,240 @@ def compute_cell_moments_inplane(psi, mu, eta, w):
     return phi, Qxx, Qxy
 
 
-def diffusion_face_currents(phi, Dcell, dx, dy, robin):
-    """
-    Compute face currents Jx_face (Nx+1,Ny), Jy_face (Nx,Ny+1)
-    with Jx positive in +x, Jy positive in +y.
-
-    Uses harmonic face D in the interior.
-    Uses the same Robin ghost relation as solve_diffusion at boundaries.
-    """
-    Nx, Ny = phi.shape
-
-    def harmonic(a, b):
-        den = a + b
-        return np.where(den > 0.0, 2.0 * a * b / den, 0.0)
-
-    def robin_ghost_coeff(Df, alpha, g, h):
-        denom = (Df / h + alpha / 2.0)
-        a = (Df / h - alpha / 2.0) / denom   # phi_g = a*phi_c + c
-        c = g / denom
-        return a, c
-
-    Jx = np.zeros((Nx+1, Ny))
-    Jy = np.zeros((Nx, Ny+1))
-
-    # --- x-faces ---
-    for j in range(Ny):
-        # left boundary face (between ghost and cell 0)
-        Dc = Dcell[0, j]
-        Dw = Dc
-        a, c = robin_ghost_coeff(Dw, robin["left"]["alpha"], robin["left"]["g"][j], dx)
-        phi_g = a * phi[0, j] + c
-        # gradient in +x at boundary face: (phi_c - phi_g)/dx
-        Jx[0, j] = -Dw * (phi[0, j] - phi_g) / dx
-
-        # interior faces
-        for i in range(1, Nx):
-            Df = harmonic(Dcell[i-1, j], Dcell[i, j])
-            Jx[i, j] = -Df * (phi[i, j] - phi[i-1, j]) / dx
-
-        # right boundary face (between cell Nx-1 and ghost)
-        Dc = Dcell[Nx-1, j]
-        De = Dc
-        a, c = robin_ghost_coeff(De, robin["right"]["alpha"], robin["right"]["g"][j], dx)
-        phi_g = a * phi[Nx-1, j] + c
-        Jx[Nx, j] = -De * (phi_g - phi[Nx-1, j]) / dx  # gradient in +x: (phi_g - phi_c)/dx
-
-    # --- y-faces ---
-    for i in range(Nx):
-        # bottom boundary face
-        Dc = Dcell[i, 0]
-        Ds = Dc
-        a, c = robin_ghost_coeff(Ds, robin["bottom"]["alpha"], robin["bottom"]["g"][i], dy)
-        phi_g = a * phi[i, 0] + c
-        Jy[i, 0] = -Ds * (phi[i, 0] - phi_g) / dy
-
-        # interior faces
-        for j in range(1, Ny):
-            Df = harmonic(Dcell[i, j-1], Dcell[i, j])
-            Jy[i, j] = -Df * (phi[i, j] - phi[i, j-1]) / dy
-
-        # top boundary face
-        Dc = Dcell[i, Ny-1]
-        Dn = Dc
-        a, c = robin_ghost_coeff(Dn, robin["top"]["alpha"], robin["top"]["g"][i], dy)
-        phi_g = a * phi[i, Ny-1] + c
-        Jy[i, Ny] = -Dn * (phi_g - phi[i, Ny-1]) / dy
-
-    return Jx, Jy
-
-
-
-def face_currents_from_phiU(phi, Ux, Uy, sig_t, dx, dy, robin, use_harmonic_sig_t=True):
-    Nx, Ny = phi.shape
-
-    def harmonic(a, b):
-        den = a + b
-        return (2.0 * a * b / den) if den > 0 else 0.0
-
-    Jx_face = np.zeros((Nx+1, Ny))
-    Jy_face = np.zeros((Nx, Ny+1))
-
-    # ---- interior vertical faces (i_edge = 1..Nx-1) ----
-    for i_edge in range(1, Nx):
-        iL = i_edge - 1
-        iR = i_edge
-        for j in range(Ny):
-            st_f = harmonic(sig_t[iL,j], sig_t[iR,j]) if use_harmonic_sig_t else 0.5*(sig_t[iL,j]+sig_t[iR,j])
-            Uxf  = 0.5*(Ux[iL,j] + Ux[iR,j])
-            Jx_face[i_edge,j] = -(0.5*(phi[iR,j] - phi[iL,j])/dx + Uxf) / (st_f + 1e-300)
-
-    # ---- interior horizontal faces (j_edge = 1..Ny-1) ----
-    for i in range(Nx):
-        for j_edge in range(1, Ny):
-            jB = j_edge - 1
-            jT = j_edge
-            st_f = harmonic(sig_t[i,jB], sig_t[i,jT]) if use_harmonic_sig_t else 0.5*(sig_t[i,jB]+sig_t[i,jT])
-            Uyf  = 0.5*(Uy[i,jB] + Uy[i,jT])
-            Jy_face[i,j_edge] = -(0.5*(phi[i,jT] - phi[i,jB])/dy + Uyf) / (st_f + 1e-300)
-
-    # ---- boundary faces via your *current-form* Robin rows used in solve_mixed_lo ----
-    alpha_x = robin["left"]["alpha"]
-    alpha_y = robin["bottom"]["alpha"]
-
-    gL = robin["left"]["g"]    # length Ny
-    gR = robin["right"]["g"]   # length Ny
-    gB = robin["bottom"]["g"]  # length Nx
-    gT = robin["top"]["g"]     # length Nx
-
-    # Left:  -Jx_face(0,j) + alpha_x/2 * phi(0,j) = gL(j)
-    for j in range(Ny):
-        Jx_face[0,j] = (alpha_x/2.0)*phi[0,j] - gL[j]
-
-    # Right: +Jx_face(Nx,j) + alpha_x/2 * phi(Nx-1,j) = gR(j)
-    for j in range(Ny):
-        Jx_face[Nx,j] = gR[j] - (alpha_x/2.0)*phi[Nx-1,j]
-
-    # Bottom: -Jy_face(i,0) + alpha_y/2 * phi(i,0) = gB(i)
-    for i in range(Nx):
-        Jy_face[i,0] = (alpha_y/2.0)*phi[i,0] - gB[i]
-
-    # Top:   +Jy_face(i,Ny) + alpha_y/2 * phi(i,Ny-1) = gT(i)
-    for i in range(Nx):
-        Jy_face[i,Ny] = gT[i] - (alpha_y/2.0)*phi[i,Ny-1]
-
-    return Jx_face, Jy_face
-
-
 #
 # Actual second moment method
 #
 
-def solve_mixed_lo(phi_rhs, sig_a, sig_t, Ux, Uy, dx, dy, robin, use_harmonic_sig_t=True):
+
+def compute_U_faces_from_edges_traceless(
+    psi_xedge, psi_yedge, mu, eta, w, dx, dy
+):
     """
-    Mixed LO solve for cell phi and face currents Jx_face, Jy_face:
-
-      div J + sig_a * phi = phi_rhs
-      sig_t_face * Jx_face + 0.5*(phi_R - phi_L)/dx + Ux_face = 0   (interior vertical faces)
-      sig_t_face * Jy_face + 0.5*(phi_T - phi_B)/dy + Uy_face = 0   (interior horizontal faces)
-
-    Boundary faces: impose Robin in terms of face current:
-      Jn + alpha*phi_f = g   (g already includes -2 J^- and ± U/sig_t depending on side in your robin dict)
+    Compute face-consistent U = div(Q) using Q built on faces from HO face angular fluxes.
 
     Returns:
-      phi (Nx,Ny), Jx_face (Nx+1,Ny), Jy_face (Nx,Ny+1)
-    """
-    Nx, Ny = phi_rhs.shape
+      Ux_xface: (Nx+1, Ny)  corresponds to Ux at vertical faces i_edge
+      Uy_yface: (Nx, Ny+1)  corresponds to Uy at horizontal faces j_edge
 
-    # indexing
+    Uses traceless in-plane basis:
+      Qxx = ∫ (mu^2 - 1/2) psi dΩ
+      Qxy = ∫ (mu*eta)     psi dΩ
+      Uy uses (∂x Qxy - ∂y Qxx), Ux uses (∂x Qxx + ∂y Qxy).
+    """
+
+    mu = np.asarray(mu); eta = np.asarray(eta); w = np.asarray(w)
+
+    # Face-averaged angular flux per direction
+    psi_x = psi_xedge.mean(axis=3)  # (Nx+1, Ny,   N_dir)
+    psi_y = psi_yedge.mean(axis=3)  # (Nx,   Ny+1, N_dir)
+
+    qxx_basis = mu**2 - 0.5
+    qxy_basis = mu * eta
+
+    # Q on x-faces and y-faces (scalar fields defined on those face grids)
+    Qxx_x = np.tensordot(psi_x, w * qxx_basis, axes=([2],[0]))  # (Nx+1, Ny)
+    Qxy_x = np.tensordot(psi_x, w * qxy_basis, axes=([2],[0]))  # (Nx+1, Ny)
+
+    Qxx_y = np.tensordot(psi_y, w * qxx_basis, axes=([2],[0]))  # (Nx, Ny+1)
+    Qxy_y = np.tensordot(psi_y, w * qxy_basis, axes=([2],[0]))  # (Nx, Ny+1)
+
+    Nx1, Ny  = Qxx_x.shape
+    Nx,  Ny1 = Qxx_y.shape
+
+    # ---- derivatives on x-face grid (Nx+1, Ny): d/dx across i_edge, d/dy across j ----
+    dQxx_dx_x = np.zeros_like(Qxx_x)
+    dQxy_dy_x = np.zeros_like(Qxy_x)
+
+    # d/dx: centered for interior faces, one-sided at boundaries
+    dQxx_dx_x[1:-1, :] = (Qxx_x[2:, :] - Qxx_x[:-2, :]) / (2.0 * dx)
+    dQxx_dx_x[0,  :]   = (Qxx_x[1, :] - Qxx_x[0,  :]) / dx
+    dQxx_dx_x[-1, :]   = (Qxx_x[-1,:] - Qxx_x[-2,:]) / dx
+
+    # d/dy: centered interior, one-sided at y boundaries
+    dQxy_dy_x[:, 1:-1] = (Qxy_x[:, 2:] - Qxy_x[:, :-2]) / (2.0 * dy)
+    dQxy_dy_x[:, 0]    = (Qxy_x[:, 1] - Qxy_x[:, 0]) / dy
+    dQxy_dy_x[:, -1]   = (Qxy_x[:, -1] - Qxy_x[:, -2]) / dy
+
+    Ux_xface = dQxx_dx_x + dQxy_dy_x
+
+    # ---- derivatives on y-face grid (Nx, Ny+1): d/dx across i, d/dy across j_edge ----
+    dQxy_dx_y = np.zeros_like(Qxy_y)
+    dQxx_dy_y = np.zeros_like(Qxx_y)
+
+    dQxy_dx_y[1:-1, :] = (Qxy_y[2:, :] - Qxy_y[:-2, :]) / (2.0 * dx)
+    dQxy_dx_y[0,  :]   = (Qxy_y[1, :] - Qxy_y[0,  :]) / dx
+    dQxy_dx_y[-1, :]   = (Qxy_y[-1,:] - Qxy_y[-2,:]) / dx
+
+    dQxx_dy_y[:, 1:-1] = (Qxx_y[:, 2:] - Qxx_y[:, :-2]) / (2.0 * dy)
+    dQxx_dy_y[:, 0]    = (Qxx_y[:, 1] - Qxx_y[:, 0]) / dy
+    dQxx_dy_y[:, -1]   = (Qxx_y[:, -1] - Qxx_y[:, -2]) / dy
+
+    Uy_yface = dQxy_dx_y - dQxx_dy_y
+
+    return Ux_xface, Uy_yface
+
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+
+def la_build_mixed(sig_a, sig_t, dx, dy, robin, use_harmonic_sig_t=True):
+    """
+    Build sparse A once and return an LU factorization object + metadata.
+    A depends on sig_a, sig_t, dx, dy, robin['*']['alpha'] (NOT on U or robin g).
+    """
+    if sp is None:
+        raise ImportError("scipy is required for sparse solve (scipy.sparse, scipy.sparse.linalg).")
+
+    Nx, Ny = sig_a.shape
+
     n_phi = Nx * Ny
     n_Jx  = (Nx + 1) * Ny
     n_Jy  = Nx * (Ny + 1)
     N = n_phi + n_Jx + n_Jy
 
-    def id_phi(i, j):  # cell-centered
-        return i * Ny + j
-
-    def id_Jx(i_edge, j):  # vertical faces
-        return n_phi + i_edge * Ny + j
-
-    def id_Jy(i, j_edge):  # horizontal faces
-        return n_phi + n_Jx + i * (Ny + 1) + j_edge
+    def id_phi(i, j):       return i * Ny + j
+    def id_Jx(i_edge, j):   return n_phi + i_edge * Ny + j
+    def id_Jy(i, j_edge):   return n_phi + n_Jx + i * (Ny + 1) + j_edge
 
     def harmonic(a, b):
         den = a + b
         return (2.0 * a * b / den) if den > 0 else 0.0
 
-    # Build linear system A x = b
-    A = np.zeros((N, N))
-    b = np.zeros(N)
+    A = sp.lil_matrix((N, N), dtype=float)
 
-    # ------------------------
-    # (1) Cell balance equations
-    # ------------------------
+    # (1) cell balance rows
     for i in range(Nx):
         for j in range(Ny):
             p = id_phi(i, j)
-
-            # div J term
             A[p, id_Jx(i + 1, j)] +=  1.0 / dx
             A[p, id_Jx(i,     j)] += -1.0 / dx
             A[p, id_Jy(i, j + 1)] +=  1.0 / dy
             A[p, id_Jy(i, j    )] += -1.0 / dy
+            A[p, p]              += sig_a[i, j]
 
-            # absorption
-            A[p, p] += sig_a[i, j]
-
-            # rhs
-            b[p] = phi_rhs[i, j]
-
-    # ------------------------
-    # (2) Interior vertical-face current equations
-    # ------------------------
+    # (2) interior vertical faces
     for i_edge in range(1, Nx):
         iL = i_edge - 1
         iR = i_edge
         for j in range(Ny):
             r = id_Jx(i_edge, j)
-
-            # face sig_t
-            if use_harmonic_sig_t:
-                st_f = harmonic(sig_t[iL, j], sig_t[iR, j])
-            else:
-                st_f = 0.5 * (sig_t[iL, j] + sig_t[iR, j])
-
-            # Ux at face (average)
-            Uxf = 0.5 * (Ux[iL, j] + Ux[iR, j])
-
-            # sig_t * Jx + 0.5*(phi_R - phi_L)/dx + Ux = 0
-            A[r, r] += st_f
+            st_f = harmonic(sig_t[iL, j], sig_t[iR, j]) if use_harmonic_sig_t else 0.5*(sig_t[iL,j] + sig_t[iR,j])
+            A[r, r]             += st_f
             A[r, id_phi(iR, j)] +=  0.5 / dx
             A[r, id_phi(iL, j)] += -0.5 / dx
-            b[r] = -Uxf
 
-    # ------------------------
-    # (3) Interior horizontal-face current equations
-    # ------------------------
+    # (3) interior horizontal faces
     for i in range(Nx):
         for j_edge in range(1, Ny):
             jB = j_edge - 1
             jT = j_edge
             r = id_Jy(i, j_edge)
-
-            if use_harmonic_sig_t:
-                st_f = harmonic(sig_t[i, jB], sig_t[i, jT])
-            else:
-                st_f = 0.5 * (sig_t[i, jB] + sig_t[i, jT])
-
-            Uyf = 0.5 * (Uy[i, jB] + Uy[i, jT])
-
-            A[r, r] += st_f
+            st_f = harmonic(sig_t[i, jB], sig_t[i, jT]) if use_harmonic_sig_t else 0.5*(sig_t[i,jB] + sig_t[i,jT])
+            A[r, r]             += st_f
             A[r, id_phi(i, jT)] +=  0.5 / dy
             A[r, id_phi(i, jB)] += -0.5 / dy
-            b[r] = -Uyf
 
-    # ------------------------
-    # (4) Boundary faces: Robin in current form (Marshak/P1)
-    #     -Jn + alpha * phi = g,    g = -2 J^-_inc
-    # ------------------------
+    # (4) boundary Robin (current-form). Only alpha enters A.
     alpha_x = robin["left"]["alpha"]
     alpha_y = robin["bottom"]["alpha"]
 
-    # Left boundary: n = (-1,0), Jn = -Jx(0,j)  => -Jn = +Jx(0,j)
-    gL = robin["left"]["g"]
+    # Left:  +Jx(0,j) + alpha_x*phi(0,j) = gL(j)
     for j in range(Ny):
         r = id_Jx(0, j)
-        A[r, r] += +1.0
-        A[r, id_phi(0, j)] += alpha_x
-        b[r] = gL[j]
+        A[r, r]           += +1.0
+        A[r, id_phi(0,j)] += alpha_x
 
-    # Right boundary: n = (+1,0), Jn = +Jx(Nx,j) => -Jn = -Jx(Nx,j)
-    gR = robin["right"]["g"]
+    # Right: -Jx(Nx,j) + alpha_x*phi(Nx-1,j) = gR(j)
     for j in range(Ny):
         r = id_Jx(Nx, j)
-        A[r, r] += -1.0
-        A[r, id_phi(Nx - 1, j)] += alpha_x
-        b[r] = gR[j]
+        A[r, r]               += -1.0
+        A[r, id_phi(Nx-1, j)] += alpha_x
 
-    # Bottom boundary: n = (0,-1), Jn = -Jy(i,0) => -Jn = +Jy(i,0)
-    gB = robin["bottom"]["g"]
+    # Bottom: +Jy(i,0) + alpha_y*phi(i,0) = gB(i)
     for i in range(Nx):
         r = id_Jy(i, 0)
-        A[r, r] += +1.0
-        A[r, id_phi(i, 0)] += alpha_y
-        b[r] = gB[i]
+        A[r, r]           += +1.0
+        A[r, id_phi(i,0)] += alpha_y
 
-    # Top boundary: n = (0,+1), Jn = +Jy(i,Ny) => -Jn = -Jy(i,Ny)
-    gT = robin["top"]["g"]
+    # Top:    -Jy(i,Ny) + alpha_y*phi(i,Ny-1) = gT(i)
     for i in range(Nx):
         r = id_Jy(i, Ny)
-        A[r, r] += -1.0
-        A[r, id_phi(i, Ny - 1)] += alpha_y
-        b[r] = gT[i]
+        A[r, r]               += -1.0
+        A[r, id_phi(i,Ny-1)]  += alpha_y
 
-    # Solve
-    x = np.linalg.solve(A, b)
+    A_csc = A.tocsc()
+    lu = spla.splu(A_csc)  # factorize once
+
+    meta = dict(Nx=Nx, Ny=Ny, n_phi=n_phi, n_Jx=n_Jx, n_Jy=n_Jy,
+                id_phi=id_phi, id_Jx=id_Jx, id_Jy=id_Jy,
+                use_harmonic_sig_t=use_harmonic_sig_t)
+    return lu, meta
+
+
+def solve_lo(source, sig_a, sig_t,
+                                Ux_xface, Uy_yface,
+                                dx, dy, robin,
+                                cache=None,
+                                use_harmonic_sig_t=True):
+    """
+    Sparse solve version of solve_mixed_lo_faces.
+    Pass cache from previous call to reuse LU factorization.
+    Returns (phi, Jx_face, Jy_face, cache).
+    """
+    if sp is None:
+        raise ImportError("scipy is required for sparse solve (scipy.sparse, scipy.sparse.linalg).")
+
+    # build/reuse factorization
+    if cache is None:
+        lu, meta = la_build_mixed(sig_a, sig_t, dx, dy, robin,
+                                                use_harmonic_sig_t=use_harmonic_sig_t)
+        cache = (lu, meta)
+    else:
+        lu, meta = cache
+
+    Nx, Ny   = meta["Nx"], meta["Ny"]
+    n_phi    = meta["n_phi"]
+    n_Jx     = meta["n_Jx"]
+    id_phi   = meta["id_phi"]
+    id_Jx    = meta["id_Jx"]
+    id_Jy    = meta["id_Jy"]
+
+    N = n_phi + n_Jx + meta["n_Jy"]
+    b = np.zeros(N, dtype=float)
+
+    # (1) cell rhs
+    for i in range(Nx):
+        for j in range(Ny):
+            b[id_phi(i, j)] = source[i, j]
+
+    # (2) interior vertical-face rhs: -Uxf
+    for i_edge in range(1, Nx):
+        for j in range(Ny):
+            b[id_Jx(i_edge, j)] = -Ux_xface[i_edge, j]
+
+    # (3) interior horizontal-face rhs: -Uyf
+    for i in range(Nx):
+        for j_edge in range(1, Ny):
+            b[id_Jy(i, j_edge)] = -Uy_yface[i, j_edge]
+
+    # (4) boundary rhs = g
+    gL = robin["left"]["g"]
+    gR = robin["right"]["g"]
+    gB = robin["bottom"]["g"]
+    gT = robin["top"]["g"]
+
+    for j in range(Ny):
+        b[id_Jx(0,  j)] = gL[j]
+        b[id_Jx(Nx, j)] = gR[j]
+    for i in range(Nx):
+        b[id_Jy(i, 0 )] = gB[i]
+        b[id_Jy(i, Ny)] = gT[i]
+
+    x = lu.solve(b)
 
     phi = x[:n_phi].reshape(Nx, Ny)
     Jx_face = x[n_phi:n_phi + n_Jx].reshape(Nx + 1, Ny)
     Jy_face = x[n_phi + n_Jx:].reshape(Nx, Ny + 1)
-    return phi, Jx_face, Jy_face
+    return phi, Jx_face, Jy_face, cache
 
 
 
@@ -580,7 +524,7 @@ def closure_P1_injection(
     M2x = np.sum(w * mu**2)
     M2y = np.sum(w * eta**2)
 
-    theta = 0.7  # blend strength; start 0.05–0.2
+    theta = 1.0  # blend strength; start 0.05–0.2
 
     # --- vertical faces i_edge = 1..Nx-1 ---
     for i_edge in range(1, Nx):
@@ -849,9 +793,14 @@ def closure_P1_additive(
     return psi_xedge, psi_yedge
 
 
+#
+# Transport Loops
+#
+
+
 def smm(
     psi, psi_xedge, psi_yedge,
-    q_cell, sig_t, sig_s, dx, dy, mu, eta, w, bc, update="yavuz", diff="diffusion", closure="simple"
+    q_cell, sig_t, sig_s, dx, dy, mu, eta, w, bc, lo_cache, update="yavuz", diff="diffusion", closure="simple"
 ):
     phi_half, Qxx, Qxy = compute_cell_moments_inplane(psi, mu, eta, w)
 
@@ -892,9 +841,14 @@ def smm(
     #
     if diff=="diffusion":
 
-        Ux *= 0
-        Uy *= 0
-        phi_acc, Jx_face, Jy_face = solve_mixed_lo(q_cell, sig_a, sig_t, Ux, Uy, dx, dy, robin)
+        # Ux *= 0
+        # Uy *= 0
+        # phi_acc, Jx_face, Jy_face = solve_mixed_lo(q_cell, sig_a, sig_t, Ux, Uy, dx, dy, robin)
+        Ux_xface = np.zeros((Nx+1, Ny))
+        Uy_yface = np.zeros((Nx, Ny+1))
+        phi_acc, Jx_face, Jy_face, lo_cache = solve_lo(q_cell, sig_a, sig_t,
+                                                        Ux_xface, Uy_yface,
+                                                        dx, dy, robin, cache=lo_cache)
 
     elif diff == "second_moment":
 
@@ -903,7 +857,18 @@ def smm(
         # g_bottom += (Uy[:, 0] / (sig_t[:, 0] + 1e-300))
         # g_top    -= (Uy[:, Ny-1] / (sig_t[:, Ny-1] + 1e-300))
 
-        phi_acc, Jx_face, Jy_face = solve_mixed_lo(q_cell, sig_a, sig_t, Ux, Uy, dx, dy, robin)
+        #phi_acc, Jx_face, Jy_face = solve_mixed_lo(q_cell, sig_a, sig_t, Ux, Uy, dx, dy, robin)
+
+        Ux_xface, Uy_yface = compute_U_faces_from_edges_traceless(
+            psi_xedge, psi_yedge, mu, eta, w, dx, dy
+        )
+        phi_acc, Jx_face, Jy_face, lo_cache = solve_lo(
+            q_cell, sig_a, sig_t,
+            Ux_xface, Uy_yface,
+            dx, dy, robin,
+            cache=lo_cache
+        )
+        
 
     if update == "rescale":
         eps = 1e-14
@@ -927,8 +892,11 @@ def smm(
         dJx  = Jx_acc - Jx_half
         dJy  = Jy_acc - Jy_half
 
-        # --- under-relaxation (critical) ---
         omega = 1.0   # start 0.3–0.7; 0.5 is a good default
+
+        # --- under-relaxation (critical) ---
+        if closure == "simple_upwind":
+            omega = 0.2   # start 0.3–0.7; 0.5 is a good default
 
         inv2pi = 1.0/(2.0*np.pi)
         invpi  = 1.0/np.pi
@@ -950,15 +918,14 @@ def smm(
             psi_xedge, psi_yedge = closure_P1_additive(
                 psi_xedge, psi_yedge, mu, eta, w, bc,
                 phi_acc, Jx_face, Jy_face,
-                omega_face=omega,   # usually use same relaxation as volume
+                omega_face=0.2,   # usually use same relaxation as volume
             )
         elif closure == "simple_upwind":
             psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
-
         else:
             print("No closure specified")
 
-    return psi, psi_xedge, psi_yedge, phi_half, phi_acc
+    return psi, psi_xedge, psi_yedge, phi_half, phi_acc, lo_cache
 
 
 # -----------------------------
@@ -984,13 +951,19 @@ def transport_2d_oci(
     y = (np.arange(Ny) + 0.5) * dy
     X, Y = np.meshgrid(x, y, indexing="xy")
 
-    if sig_t == None:
-        sig_t = sig_t_val * np.ones((Nx, Ny))
-    if sig_s == None:
-        assert (sig_s_val < sig_t).all
-        sig_s = sig_s_val * np.ones((Nx, Ny))
-    if q == None:
-        q_cell = q_val * np.ones((Nx, Ny))
+    # if sig_t != None:
+    #     s = 0
+    # else:
+    #     sig_t = sig_t_val * np.ones((Nx, Ny))
+    # if sig_s != None:
+    #     s = 0
+    # else:
+    #     assert (sig_s_val < sig_t).all
+    #     sig_s = sig_s_val * np.ones((Nx, Ny))
+    # if q != None:
+    #     s = 0
+    # else:
+    #     q = q_val * np.ones((Nx, Ny))
 
     mu, eta, w, omega_total = make_circle_quadrature(N_dir)
 
@@ -1000,13 +973,16 @@ def transport_2d_oci(
     psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
     psi_xedge_last = np.zeros_like(psi_xedge)
 
+    # before the iteration loop:
+    lo_cache = None
+
     err_last = 1.0
     for it in range(max_it):
         # --- transport half-step (OCI) ---
         for i in range(Nx):
             for j in range(Ny):
                 A = build_cell_matrix(dx, dy, sig_t[i, j], sig_s[i, j], mu, eta, w, omega_total)
-                b = build_cell_rhs(i, j, dx, dy, q_cell[i, j], mu, eta, w, omega_total,
+                b = build_cell_rhs(i, j, dx, dy, q[i, j], mu, eta, w, omega_total,
                                    psi_xedge, psi_yedge)
                 xloc = np.linalg.solve(A, b)
                 psi[i, j, :, :] = xloc.reshape(N_dir, 4)
@@ -1015,17 +991,18 @@ def transport_2d_oci(
         psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
 
         # --- second-moment acceleration step (optional) ---
-        if smm_acc and sig_s_val > 0.0:
-            psi, psi_xedge, psi_yedge, phi_half, phi_acc = smm(
+        if smm_acc:
+            psi, psi_xedge, psi_yedge, phi_half, phi_acc, lo_cache = smm(
             psi=psi,
             psi_xedge=psi_xedge,
             psi_yedge=psi_yedge,
-            q_cell=q_cell,
+            q_cell=q,
             sig_t=sig_t,
             sig_s=sig_s,
             dx=dx, dy=dy,
             mu=mu, eta=eta, w=w,
             bc=bc,
+            lo_cache=lo_cache,
             update=update,   # or whatever you want
             diff=diff,
             closure=closure
@@ -1065,8 +1042,9 @@ if __name__ == "__main__":
     inf_homo = q / ( sigma*(1-c) )
     inf_homo /= (2*np.pi)
     
-    bc = dict(left=0, right=inf_homo, bottom=inf_homo, top=inf_homo)
+    bc = dict(left=inf_homo, right=inf_homo, bottom=inf_homo, top=inf_homo)
 
+    global_flag_transport_scattering = False
 
     phi, psi, ang, mesh, rho, it = transport_2d_oci(
         Nx=30, Ny=30, Lx=1.0, Ly=1.0,
@@ -1075,21 +1053,10 @@ if __name__ == "__main__":
         q_val=q,
         bc=bc,
         tol=1e-6, max_it=500, printer=True,
-        smm_acc=True, update="yavuz", diff="second_moment", closure="simple_upwind",
+        smm_acc=True, update="yavuz", diff="diffusion", closure="simple_upwind",
     )
 
-    x, y, X, Y = mesh["x"], mesh["y"], mesh["X"], mesh["Y"]
-    plt.figure()
-    plt.imshow(phi.T, origin="lower",
-               extent=[x.min(), x.max(), y.min(), y.max()],
-               aspect="auto")
-    plt.colorbar(label=r"$\phi(x,y)$")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.title("2D Corner-Balance Sn (OCI) + Second-Moment Acceleration: Scalar Flux")
-    plt.tight_layout()
-    plt.show()
-
+    global_flag_transport_scattering = True
 
     phi_t, psi_t, ang, mesh, rho, it = transport_2d_oci(
         Nx=30, Ny=30, Lx=1.0, Ly=1.0,
@@ -1098,12 +1065,13 @@ if __name__ == "__main__":
         q_val=q,
         bc=bc,
         tol=1e-6, max_it=500, printer=True,
-        smm_acc=True, update="yavuz", diff="second_moment"
+        smm_acc=False, update="yavuz", diff="second_moment"
     )
 
     x, y, X, Y = mesh["x"], mesh["y"], mesh["X"], mesh["Y"]
     plt.figure()
-    plt.imshow(phi_t.T, origin="lower",
+    differ = np.abs(phi - phi_t)
+    plt.imshow(differ.T, origin="lower",
                extent=[x.min(), x.max(), y.min(), y.max()],
                aspect="auto")
     plt.colorbar(label=r"$\phi(x,y)$")
