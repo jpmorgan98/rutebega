@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import numba as nb
 
 # -----------------------------
 # 2D Discrete Ordinates (in-plane)
@@ -16,6 +17,7 @@ def make_circle_quadrature(N_dir: int):
 # -----------------------------
 # Corner-balance local operator
 # -----------------------------
+@nb.njit
 def A_dir_corner_balance(mu, eta, dx, dy, sig_t):
     hx = dx / 2.0
     hy = dy / 2.0
@@ -34,6 +36,7 @@ def A_dir_corner_balance(mu, eta, dx, dy, sig_t):
 
 global_flag_transport_scattering = True
 
+# @nb.njit
 def build_cell_matrix(dx, dy, sig_t, sig_s, mu, eta, w, omega_total):
     N_dir = len(w)
     n = 4 * N_dir
@@ -436,7 +439,7 @@ def solve_lo(source, sig_a, sig_t,
                                 Ux_xface, Uy_yface,
                                 dx, dy, robin,
                                 cache=None,
-                                use_harmonic_sig_t=True):
+                                use_harmonic_sig_t=False):
     """
     Sparse solve version of solve_mixed_lo_faces.
     Pass cache from previous call to reuse LU factorization.
@@ -797,10 +800,11 @@ def closure_P1_additive(
 # Transport Loops
 #
 
+import con_sys as cs
 
 def smm(
     psi, psi_xedge, psi_yedge,
-    q_cell, sig_t, sig_s, dx, dy, mu, eta, w, bc, lo_cache, update="yavuz", diff="diffusion", closure="simple"
+    q_cell, sig_t, sig_s, dx, dy, mu, eta, w, bc, sor, lo_cache, update="yavuz", diff="diffusion", closure="simple"
 ):
     phi_half, Qxx, Qxy = compute_cell_moments_inplane(psi, mu, eta, w)
 
@@ -841,13 +845,16 @@ def smm(
     #
     if diff=="diffusion":
 
+        #q_cell = 
+
         # Ux *= 0
         # Uy *= 0
         # phi_acc, Jx_face, Jy_face = solve_mixed_lo(q_cell, sig_a, sig_t, Ux, Uy, dx, dy, robin)
-        Ux_xface = np.zeros((Nx+1, Ny))
-        Uy_yface = np.zeros((Nx, Ny+1))
+        Ux_xface_t = np.zeros((Nx+1, Ny))
+        Uy_yface_t = np.zeros((Nx, Ny+1))
+
         phi_acc, Jx_face, Jy_face, lo_cache = solve_lo(q_cell, sig_a, sig_t,
-                                                        Ux_xface, Uy_yface,
+                                                        Ux_xface_t, Uy_yface_t,
                                                         dx, dy, robin, cache=lo_cache)
 
     elif diff == "second_moment":
@@ -859,6 +866,7 @@ def smm(
 
         #phi_acc, Jx_face, Jy_face = solve_mixed_lo(q_cell, sig_a, sig_t, Ux, Uy, dx, dy, robin)
 
+        # 1 DOF/cell
         Ux_xface, Uy_yface = compute_U_faces_from_edges_traceless(
             psi_xedge, psi_yedge, mu, eta, w, dx, dy
         )
@@ -868,6 +876,32 @@ def smm(
             dx, dy, robin,
             cache=lo_cache
         )
+
+        # phi_sub, Jx_sub, Jy_sub, phi_f, Jx_face, Jy_face, lo_cache = cs.solve_smm_lo_subcell_refined(
+        #     q_cell=q_cell,
+        #     sig_t=sig_t,
+        #     sig_s=sig_s,
+        #     psi_cell=psi,
+        #     psi_xedge=psi_xedge,
+        #     psi_yedge=psi_yedge,
+        #     dx=dx, dy=dy,
+        #     mu=mu, eta=eta, w=w,
+        #     bc=bc,
+        #     solve_lo=solve_lo,
+        #     lo_cache_fine=lo_cache,
+        # )
+
+
+        # phi_acc, Jx_face, Jy_face, lo_cache, phi_sub = solve_lo_scsm_subcell(
+        #     source=q_cell,
+        #     sig_a=sig_a,
+        #     sig_t=sig_t,
+        #     psi_cell=psi,
+        #     dx=dx, dy=dy,
+        #     mu=mu, eta=eta, w=w,
+        #     bc=bc,
+        #     cache=lo_cache
+        # )
         
 
     if update == "rescale":
@@ -896,7 +930,7 @@ def smm(
 
         # --- under-relaxation (critical) ---
         if closure == "simple_upwind":
-            omega = 0.2   # start 0.3–0.7; 0.5 is a good default
+            omega = sor   # start 0.3–0.7; 0.5 is a good default
 
         inv2pi = 1.0/(2.0*np.pi)
         invpi  = 1.0/np.pi
@@ -915,10 +949,15 @@ def smm(
                 phi_acc, Jx_face, Jy_face
         )
         elif closure == "additive":
+            #psi_xedge, psi_yedge = closure_P1_additive(
+            #    psi_xedge, psi_yedge, mu, eta, w, bc,
+            #    phi_acc, Jx_face, Jy_face,
+            #    omega_face=sor,   # usually use same relaxation as volume
+            #)
             psi_xedge, psi_yedge = closure_P1_additive(
                 psi_xedge, psi_yedge, mu, eta, w, bc,
                 phi_acc, Jx_face, Jy_face,
-                omega_face=0.2,   # usually use same relaxation as volume
+                omega_face=sor,   # your damping
             )
         elif closure == "simple_upwind":
             psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
@@ -951,19 +990,13 @@ def transport_2d_oci(
     y = (np.arange(Ny) + 0.5) * dy
     X, Y = np.meshgrid(x, y, indexing="xy")
 
-    # if sig_t != None:
-    #     s = 0
-    # else:
-    #     sig_t = sig_t_val * np.ones((Nx, Ny))
-    # if sig_s != None:
-    #     s = 0
-    # else:
-    #     assert (sig_s_val < sig_t).all
-    #     sig_s = sig_s_val * np.ones((Nx, Ny))
-    # if q != None:
-    #     s = 0
-    # else:
-    #     q = q_val * np.ones((Nx, Ny))
+    if sig_t is None:
+        sig_t = sig_t_val * np.ones((Nx, Ny))
+    if sig_s is None:
+        assert (sig_s_val < sig_t).all
+        sig_s = sig_s_val * np.ones((Nx, Ny))
+    if q is None:
+        q = q_val * np.ones((Nx, Ny))
 
     mu, eta, w, omega_total = make_circle_quadrature(N_dir)
 
@@ -977,7 +1010,10 @@ def transport_2d_oci(
     lo_cache = None
 
     err_last = 1.0
-    for it in range(max_it):
+    sor_val = 0.2
+
+    it = 0
+    while it < (max_it):
         # --- transport half-step (OCI) ---
         for i in range(Nx):
             for j in range(Ny):
@@ -1001,7 +1037,7 @@ def transport_2d_oci(
             sig_s=sig_s,
             dx=dx, dy=dy,
             mu=mu, eta=eta, w=w,
-            bc=bc,
+            bc=bc, sor=sor_val,
             lo_cache=lo_cache,
             update=update,   # or whatever you want
             diff=diff,
@@ -1023,6 +1059,22 @@ def transport_2d_oci(
         psi_xedge_last[:] = psi_xedge
         err_last = max(err, 1e-300)
 
+        it += 1
+
+        if smm_acc and it > 2 and rho > 1.0:
+            sor_val -= 0.05
+
+            print(f"RESTARTING, α={sor_val}")
+
+            if sor_val < 0.0:
+                raise("ERROR SOR TRIED TO GO NEG")
+            
+            psi = np.zeros((Nx, Ny, N_dir, 4))
+            psi_last = psi.copy()
+            psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
+            psi_xedge_last = np.zeros_like(psi_xedge)
+            it = 0
+
     # Scalar flux (cell-average)
     psi_avg = np.mean(psi, axis=3)                 # (Nx,Ny,N_dir)
     phi = np.tensordot(psi_avg, w, axes=([2],[0])) # (Nx,Ny)
@@ -1033,11 +1085,132 @@ def transport_2d_oci(
     return phi, psi, angles, mesh, rho, it
 
 
+# ----------------------------------------------------------------------
+# Runner: same as your transport_2d_oci, but:
+#   - random IC (or provided psi0)
+#   - no adaptive restart logic (so spectral radius is meaningful)
+#   - returns an asymptotic rho estimate from tail ratios
+# ----------------------------------------------------------------------
+def transport_2d_oci_spectral(
+    Nx, Ny, Lx, Ly, N_dir,
+    sig_t_val, sig_s_val, q_val,
+    bc,
+    smm_acc=False,
+    update="yavuz",
+    diff="second_moment",
+    closure="additive",
+    sor_val=0.2,
+    tol=1e-10,
+    max_it=1000,
+    psi0=None,
+    seed=None,
+    burn_in=10,
+    tail_len=20,
+    printer=False,
+):
+    global global_flag_transport_scattering
+
+    dx = Lx / Nx
+    dy = Ly / Ny
+
+    sig_t = sig_t_val * np.ones((Nx, Ny))
+    sig_s = sig_s_val * np.ones((Nx, Ny))
+    q     = q_val*np.ones((Nx, Ny))
+
+    mu, eta, w, omega_total = make_circle_quadrature(N_dir)
+
+    # --- initial condition (random IC) ---
+    if psi0 is not None:
+        psi = psi0.copy()
+    else:
+        rng = np.random.default_rng(seed)
+        # scale around a characteristic inflow magnitude
+        bc_vals = [bc.get("left", 0.0), bc.get("right", 0.0), bc.get("bottom", 0.0), bc.get("top", 0.0)]
+        scale = float(np.mean(bc_vals)) if np.all([np.isscalar(v) for v in bc_vals]) else 1.0
+        scale = max(scale, 1e-12)
+        psi = scale * (1.0 + 0.2*(rng.random((Nx, Ny, N_dir, 4)) - 0.5))
+        psi = np.maximum(psi, 0.0)
+
+    psi_last = psi.copy()
+
+    psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
+
+    lo_cache = None
+
+    err_last = None
+    rho_hist = []
+
+    for it in range(max_it):
+
+        # --- OCI transport half-step ---
+        for i in range(Nx):
+            for j in range(Ny):
+                A = build_cell_matrix(dx, dy, sig_t[i, j], sig_s[i, j], mu, eta, w, omega_total)
+                b = build_cell_rhs(i, j, dx, dy, q[i, j], mu, eta, w, omega_total, psi_xedge, psi_yedge)
+                xloc = np.linalg.solve(A, b)
+                psi[i, j, :, :] = xloc.reshape(N_dir, 4)
+
+        # Update edges by upwind closure (half-iterate)
+        psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
+
+        # --- SMM step (your second-moment acceleration + closure choice) ---
+        if smm_acc:
+            psi, psi_xedge, psi_yedge, phi_half, phi_acc, lo_cache = smm(
+                psi=psi,
+                psi_xedge=psi_xedge,
+                psi_yedge=psi_yedge,
+                q_cell=q,              # keep consistent with your implementation
+                sig_t=sig_t,
+                sig_s=sig_s,
+                dx=dx, dy=dy,
+                mu=mu, eta=eta, w=w,
+                bc=bc,
+                sor=sor_val,
+                lo_cache=lo_cache,
+                update=update,
+                diff=diff,
+                closure=closure,
+            )
+
+        # --- spectral radius tracking (iterate-difference norm ratio) ---
+        err = np.linalg.norm((psi-psi_last).ravel(), ord=2)
+        if err_last is not None:
+            rho = err / max(err_last, 1e-300)
+            if np.isfinite(rho):
+                rho_hist.append(rho)
+        else:
+            rho = np.nan
+
+        if printer:
+            print(f"it {it:4d}  err {err:.3e}  rho {rho:.6f}")
+
+        # simple convergence check
+        if it > 5 and err < tol:
+            break
+
+        psi_last[:] = psi
+        err_last = err
+
+    # asymptotic rho estimate from the tail (robust median)
+    if len(rho_hist) > burn_in:
+        tail = rho_hist[-min(tail_len, len(rho_hist) - burn_in):]
+        rho_est = float(np.median(tail))
+    elif len(rho_hist) > 0:
+        rho_est = float(np.median(rho_hist))
+    else:
+        rho_est = np.nan
+
+    # scalar flux (optional output if you want it)
+    psi_avg = np.mean(psi, axis=3)
+    phi = np.tensordot(psi_avg, w, axes=([2], [0]))
+
+    return rho_est, it, phi
+
 if __name__ == "__main__":
 
     q = 2.0
-    sigma = 5.0
-    c = 0.9
+    sigma = 10.0
+    c = 0.99
     sigma_s = sigma*c
     inf_homo = q / ( sigma*(1-c) )
     inf_homo /= (2*np.pi)
@@ -1053,7 +1226,7 @@ if __name__ == "__main__":
         q_val=q,
         bc=bc,
         tol=1e-6, max_it=500, printer=True,
-        smm_acc=True, update="yavuz", diff="diffusion", closure="simple_upwind",
+        smm_acc=True, update="yavuz", diff="second_moment", closure="additive",
     )
 
     global_flag_transport_scattering = True
@@ -1065,24 +1238,54 @@ if __name__ == "__main__":
         q_val=q,
         bc=bc,
         tol=1e-6, max_it=500, printer=True,
-        smm_acc=False, update="yavuz", diff="second_moment"
+        smm_acc=False, update="yavuz", diff="second_moment", closure="additive"
     )
 
-    x, y, X, Y = mesh["x"], mesh["y"], mesh["X"], mesh["Y"]
-    plt.figure()
-    differ = np.abs(phi - phi_t)
-    plt.imshow(differ.T, origin="lower",
-               extent=[x.min(), x.max(), y.min(), y.max()],
-               aspect="auto")
-    plt.colorbar(label=r"$\phi(x,y)$")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.title("2D Corner-Balance Sn (OCI) + Second-Moment Acceleration: Scalar Flux")
-    plt.tight_layout()
-    plt.show()
+    # --- plotting: phi (acc), phi_t (transport), and |error| side-by-side with contourf ---
 
-    print("phi min/max:", phi_t.min(), phi_t.max())
+    x, y = mesh["x"], mesh["y"]
+
+    # For contourf, build 2D grids that match phi shape (Nx,Ny)
+    # With your mesh construction, x and y are cell centers.
+    Xc, Yc = np.meshgrid(x, y, indexing="ij")   # shapes (Nx,Ny)
+
+    err = np.abs(phi - phi_t)
+
+    # Use common color limits for the two phi plots
+    vmin_phi = np.min([np.min(phi), np.min(phi_t)])
+    vmax_phi = np.max([np.max(phi), np.max(phi_t)]) * 1.2
+
+    fig, axs = plt.subplots(ncols=3, figsize=(12, 4), layout="constrained")
+
+    c1 = axs[1].contourf(Xc, Yc, phi_t, levels=100, vmin=vmin_phi, vmax=vmax_phi, antialiased=True)
+    c1.set_edgecolor("face")
+    axs[1].set_title(r"$\phi_t$ (normal OCI)")
+    axs[1].set_xlabel("x")
+    axs[1].set_ylabel("y")
+    fig.colorbar(c1, ax=axs[1], label=r"$\phi$")
+
+    # (1) accelerated/HOLO result
+    c0 = axs[0].contourf(Xc, Yc, phi, vmin=vmin_phi, vmax=vmax_phi, antialiased=True)
+    c0.set_edgecolor("face")
+    axs[0].set_title(r"$\phi$ (accelerated)")
+    axs[0].set_xlabel("x")
+    axs[0].set_ylabel("y")
+    fig.colorbar(c0, ax=axs[0], label=r"$\phi$")
+
+    # (2) baseline transport (normal OCI)
     
 
-    print(np.linalg.norm(phi_t-phi))
-    print(np.linalg.norm(psi_t-psi))
+    # (3) absolute error
+    c2 = axs[2].contourf(Xc, Yc, err, levels=100, antialiased=True)
+    c2.set_edgecolor("face")
+    axs[2].set_title(r"$|\phi - \phi_t|$")
+    axs[2].set_xlabel("x")
+    axs[2].set_ylabel("y")
+    fig.colorbar(c2, ax=axs[2], label=r"$|\Delta \phi|$")
+
+    plt.savefig("phi_phiT_error_contourf.pdf")
+    plt.show()
+
+    print("phi_t min/max:", phi_t.min(), phi_t.max())
+    print("||phi_t - phi||_2:", np.linalg.norm(phi_t - phi))
+    print("||psi_t - psi||_2:", np.linalg.norm(psi_t - psi))
