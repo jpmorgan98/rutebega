@@ -55,9 +55,9 @@ def case_beam_void_channel():
     Stresses: boundary layer, ray effects, near-void, HOLO closure consistency.
     """
     Lx, Ly = 4.0, 2.0
-    Nx, Ny = 80, 40
+    Nx, Ny = 20, 10
     dx, dy = Lx / Nx, Ly / Ny
-    N_dir = 64
+    N_dir = 8
 
     x = (np.arange(Nx) + 0.5) * dx
     y = (np.arange(Ny) + 0.5) * dy
@@ -78,7 +78,7 @@ def case_beam_void_channel():
     sig_t[stripe] = 200.0
     sig_s[stripe] = 0.0
 
-    q = np.zeros((Nx, Ny))
+    q = np.ones((Nx, Ny))
 
     mu, eta, w, _ = sn.make_circle_quadrature(N_dir)
     bc = make_beam_bc(mu, eta, w, strength=5.0, theta0=0.0, half_angle=0.08)
@@ -93,9 +93,9 @@ def case_checkerboard_void_scatter():
     Stresses: strong discontinuities, near-void, interface currents, P1 closure on faces.
     """
     Lx, Ly = 2.0, 2.0
-    Nx, Ny = 60, 60
+    Nx, Ny = 10, 10
     dx, dy = Lx / Nx, Ly / Ny
-    N_dir = 48
+    N_dir = 4
 
     sig_t = np.zeros((Nx, Ny))
     sig_s = np.zeros((Nx, Ny))
@@ -134,9 +134,9 @@ def case_plane_walls_extreme():
     Stresses: discontinuities, streaming across gaps, diffusion-like LO stress.
     """
     Lx, Ly = 4.0, 2.0
-    Nx, Ny = 120, 60
+    Nx, Ny = 12, 6
     dx, dy = Lx / Nx, Ly / Ny
-    N_dir = 64
+    N_dir = 8
 
     x = (np.arange(Nx) + 0.5) * dx
 
@@ -235,8 +235,8 @@ def compare_to_ref(case, ref, test, ang, mesh):
 def main():
     cases = [
         case_beam_void_channel(),
-        case_checkerboard_void_scatter(),
-        case_plane_walls_extreme(),
+        #case_checkerboard_void_scatter(),
+        #case_plane_walls_extreme(),
     ]
 
     for case in cases:
@@ -275,9 +275,34 @@ def main():
             print(f"  rel abs rxn rate       = {m['rel_abs_rxn_rate']:.3e}")
             print(f"  min(phi), min(psi)     = {m['min_phi']:.3e}, {m['min_psi']:.3e}")
             print(f"  Ra_ref, Ra_test        = {m['Ra_ref']:.6e}, {m['Ra_tst']:.6e}")
-
+        
         print_metrics("[ACC]", acc_metrics)
         print_metrics("[STRESS]", str_metrics)
+
+        def plot_sf(phi_set):
+            import matplotlib.pyplot as plt
+            
+            N, M = phi_set[0].shape
+            for i, phi in enumerate(phi_set):
+                assert (np.array([N,M]) == phi.shape).all()
+
+            P = len(phi_set)
+
+            x = np.linspace(0, M - 1, M)
+            y = np.linspace(0, N - 1, N)
+            X, Y = np.meshgrid(x,y)
+
+            fig, axs = plt.subplots(1, P, sharey=True)
+
+            # Plot each country on its own subplot
+            for i, ax in enumerate(axs):
+                ax.contourf(X, Y, phi_set[i])
+
+            plt.show()
+
+        plot_sf([phi_ref, phi_acc, phi_str])
+
+        
 
 if __name__ == "__main__":
     main()

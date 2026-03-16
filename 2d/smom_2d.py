@@ -800,8 +800,6 @@ def closure_P1_additive(
 # Transport Loops
 #
 
-import con_sys as cs
-
 def smm(
     psi, psi_xedge, psi_yedge,
     q_cell, sig_t, sig_s, dx, dy, mu, eta, w, bc, sor, lo_cache, update="yavuz", diff="diffusion", closure="simple"
