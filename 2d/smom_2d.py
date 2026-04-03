@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import numba as nb
 
 # -----------------------------
 # 2D Discrete Ordinates (in-plane)
@@ -17,7 +16,6 @@ def make_circle_quadrature(N_dir: int):
 # -----------------------------
 # Corner-balance local operator
 # -----------------------------
-@nb.njit
 def A_dir_corner_balance(mu, eta, dx, dy, sig_t):
     hx = dx / 2.0
     hy = dy / 2.0
@@ -965,6 +963,22 @@ def smm(
     return psi, psi_xedge, psi_yedge, phi_half, phi_acc, lo_cache
 
 
+gmres = False
+
+if gmres:
+    from gmres import make_next_gmres
+    next_gmres = make_next_gmres(m=5, damping=1.0)
+
+    def pack_edge_state(psi_xedge, psi_yedge):
+        return np.concatenate([psi_xedge.ravel(), psi_yedge.ravel()])
+
+    def unpack_edge_state(z, psi_xedge_shape, psi_yedge_shape):
+        nx = np.prod(psi_xedge_shape)
+        psi_xedge = z[:nx].reshape(psi_xedge_shape).copy()
+        psi_yedge = z[nx:].reshape(psi_yedge_shape).copy()
+        return psi_xedge, psi_yedge
+
+
 # -----------------------------
 # OCI transport solve (2D) + SMA
 # -----------------------------
@@ -998,17 +1012,18 @@ def transport_2d_oci(
 
     mu, eta, w, omega_total = make_circle_quadrature(N_dir)
 
-    psi = np.zeros((Nx, Ny, N_dir, 4))
+    psi = np.random.random((Nx, Ny, N_dir, 4))
     psi_last = psi.copy()
     
     psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
     psi_xedge_last = np.zeros_like(psi_xedge)
+    psi_yedge_last = np.zeros_like(psi_yedge)
 
     # before the iteration loop:
     lo_cache = None
 
     err_last = 1.0
-    sor_val = 0.2
+    sor_val = 1.0
 
     it = 0
     while it < (max_it):
@@ -1041,6 +1056,14 @@ def transport_2d_oci(
             diff=diff,
             closure=closure
         )
+            
+        if gmres:
+            z_raw = pack_edge_state(psi_xedge, psi_yedge)
+            z_old = pack_edge_state(psi_xedge_last, psi_yedge_last)
+
+            z_acc = next_gmres(z_raw, z_old)
+
+            psi_xedge, psi_yedge = unpack_edge_state(z_acc, psi_xedge.shape, psi_yedge.shape)
 
         # Convergence check (on accelerated iterate)
         err = np.linalg.norm((psi - psi_last).ravel(), ord=2)
@@ -1050,28 +1073,27 @@ def transport_2d_oci(
         if printer:
             print(f"it {it:4d}  err {err:.3e}  ρ {rho:.5f}")
 
-        if it > 2 and err < tol * (1.0 - min(max(rho, 0.0), 0.999999)):
+        if it > 50 and err < tol * (1.0 - min(max(rho, 0.0), 0.999999)):
             break
 
         psi_last[:] = psi
         psi_xedge_last[:] = psi_xedge
+        psi_yedge_last[:] = psi_yedge
         err_last = max(err, 1e-300)
 
         it += 1
 
-        if smm_acc and it > 2 and rho > 1.0:
-            sor_val -= 0.05
-
-            print(f"RESTARTING, α={sor_val}")
-
-            if sor_val < 0.0:
-                raise("ERROR SOR TRIED TO GO NEG")
-            
-            psi = np.zeros((Nx, Ny, N_dir, 4))
-            psi_last = psi.copy()
-            psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
-            psi_xedge_last = np.zeros_like(psi_xedge)
-            it = 0
+        #if smm_acc and it > 2 and rho > 1.0:
+        #    sor_val -= 0.05
+        #    print(f"RESTARTING, α={sor_val}")
+        #    if sor_val < 0.0:
+        #        raise("ERROR SOR TRIED TO GO NEG")
+        #    
+        #    psi = np.zeros((Nx, Ny, N_dir, 4))
+        #    psi_last = psi.copy()
+        #    psi_xedge, psi_yedge = compute_edge_fluxes(psi, mu, eta, bc)
+        #    psi_xedge_last = np.zeros_like(psi_xedge)
+        #    it = 0
 
     # Scalar flux (cell-average)
     psi_avg = np.mean(psi, axis=3)                 # (Nx,Ny,N_dir)
@@ -1081,7 +1103,6 @@ def transport_2d_oci(
     mesh = dict(x=x, y=y, X=X, Y=Y, dx=dx, dy=dy)
 
     return phi, psi, angles, mesh, rho, it
-
 
 # ----------------------------------------------------------------------
 # Runner: same as your transport_2d_oci, but:
@@ -1170,6 +1191,9 @@ def transport_2d_oci_spectral(
                 closure=closure,
             )
 
+        if gmres:
+            psi = next_gmres(psi, psi_last)
+
         # --- spectral radius tracking (iterate-difference norm ratio) ---
         err = np.linalg.norm((psi-psi_last).ravel(), ord=2)
         if err_last is not None:
@@ -1183,7 +1207,7 @@ def transport_2d_oci_spectral(
             print(f"it {it:4d}  err {err:.3e}  rho {rho:.6f}")
 
         # simple convergence check
-        if it > 5 and err < tol:
+        if it > 50 and err < tol:
             break
 
         psi_last[:] = psi
@@ -1213,7 +1237,7 @@ if __name__ == "__main__":
     inf_homo = q / ( sigma*(1-c) )
     inf_homo /= (2*np.pi)
     
-    bc = dict(left=inf_homo, right=inf_homo, bottom=inf_homo, top=inf_homo)
+    bc = dict(left=0, right=inf_homo, bottom=inf_homo, top=inf_homo)
 
     global_flag_transport_scattering = False
 
@@ -1263,7 +1287,7 @@ if __name__ == "__main__":
     fig.colorbar(c1, ax=axs[1], label=r"$\phi$")
 
     # (1) accelerated/HOLO result
-    c0 = axs[0].contourf(Xc, Yc, phi, vmin=vmin_phi, vmax=vmax_phi, antialiased=True)
+    c0 = axs[0].contourf(Xc, Yc, phi, levels=100, vmin=vmin_phi, vmax=vmax_phi, antialiased=True)
     c0.set_edgecolor("face")
     axs[0].set_title(r"$\phi$ (accelerated)")
     axs[0].set_xlabel("x")

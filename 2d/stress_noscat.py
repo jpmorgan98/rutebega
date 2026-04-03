@@ -93,7 +93,7 @@ def case_checkerboard_void_scatter():
     Stresses: strong discontinuities, near-void, interface currents, P1 closure on faces.
     """
     Lx, Ly = 2.0, 2.0
-    Nx, Ny = 10, 10
+    Nx, Ny = 20, 20
     dx, dy = Lx / Nx, Ly / Ny
     N_dir = 4
 
@@ -101,7 +101,7 @@ def case_checkerboard_void_scatter():
     sig_s = np.zeros((Nx, Ny))
 
     # Block size
-    bs = 5
+    bs = 2
     for i in range(Nx):
         for j in range(Ny):
             bi, bj = i // bs, j // bs
@@ -119,8 +119,8 @@ def case_checkerboard_void_scatter():
     y = (np.arange(Ny) + 0.5) * dy
     X, Y = np.meshgrid(x, y, indexing="ij")
     r2 = (X - Lx/2)**2 + (Y - Ly/2)**2
-    q = np.zeros((Nx, Ny))
-    q[r2 < (0.35**2)] = 5.0
+    q = 5*np.ones((Nx, Ny))
+    #q[r2 < (0.35**2)] = 5.0
 
     bc = dict(left=0.0, right=0.0, bottom=0.0, top=0.0)
 
@@ -134,7 +134,7 @@ def case_plane_walls_extreme():
     Stresses: discontinuities, streaming across gaps, diffusion-like LO stress.
     """
     Lx, Ly = 4.0, 2.0
-    Nx, Ny = 12, 6
+    Nx, Ny = 24, 12
     dx, dy = Lx / Nx, Ly / Ny
     N_dir = 8
 
@@ -234,9 +234,9 @@ def compare_to_ref(case, ref, test, ang, mesh):
 
 def main():
     cases = [
-        case_beam_void_channel(),
+        #case_beam_void_channel(),
         #case_checkerboard_void_scatter(),
-        #case_plane_walls_extreme(),
+        case_plane_walls_extreme(),
     ]
 
     for case in cases:
@@ -279,12 +279,18 @@ def main():
         print_metrics("[ACC]", acc_metrics)
         print_metrics("[STRESS]", str_metrics)
 
+
         def plot_sf(phi_set):
             import matplotlib.pyplot as plt
+
+            max_val = 0
+            min_val = 0
             
             N, M = phi_set[0].shape
             for i, phi in enumerate(phi_set):
                 assert (np.array([N,M]) == phi.shape).all()
+                max_val = max(np.max(phi), max_val)
+                min_val = min(np.min(phi), min_val)
 
             P = len(phi_set)
 
@@ -296,8 +302,8 @@ def main():
 
             # Plot each country on its own subplot
             for i, ax in enumerate(axs):
-                ax.contourf(X, Y, phi_set[i])
-
+                p = ax.contourf(X, Y, phi_set[i], vmax=max_val, vmin=min_val)
+            fig.colorbar(p)
             plt.show()
 
         plot_sf([phi_ref, phi_acc, phi_str])
